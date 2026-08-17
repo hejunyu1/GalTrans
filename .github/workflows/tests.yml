@@ -20,6 +20,9 @@ jobs:
         with:
           python-version: "3.13"
 
+      - name: Create project virtual environment
+        run: python -m venv .venv
+
       - name: Run unit tests
         run: |
           $env:PYTHONPATH = Join-Path $PWD "src"
