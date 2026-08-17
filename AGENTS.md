@@ -33,6 +33,25 @@ Before handing off a change, run the tests, `compileall`, and `git diff --check`
 6. Keep engine-specific parsing behind adapters and expose a shared intermediate representation.
 7. Model responses must be schema-validated before they can enter an export pipeline.
 
+## AI engineering quality guardrails
+
+- Work on one roadmap milestone at a time and keep changes small enough to review and reverse.
+- Inspect the current implementation and tests before changing behavior; do not invent project
+  state from conversation memory.
+- Add or update tests for every behavior change and every fixed bug. Never weaken, skip, or delete
+  a failing test merely to make a change pass.
+- Prefer the simplest design that meets the current milestone. Do not add speculative frameworks,
+  abstractions, dependencies, or compatibility layers without a concrete present need.
+- Keep deterministic engine handling separate from model-driven language work. A model proposal
+  must cross a typed, schema-validated boundary before deterministic code can use it.
+- After two substantially similar failed attempts, stop repeating the same approach. Re-read the
+  evidence, state the unresolved cause, and either try a meaningfully different method or ask the
+  user for the exact missing input.
+- Keep documentation explicit about what is implemented, proposed, unsupported, and unverified.
+  Do not describe planned behavior as complete.
+- Before committing a version, review the full diff for accidental scope growth, duplicated logic,
+  secrets, generated files, unauthorized content, and changes unrelated to the milestone.
+
 ## Documentation
 
 - `docs/vision.md`: durable product direction and non-goals.
@@ -62,9 +81,13 @@ implemented.
 
 ## Version control and GitHub publishing
 
-- At the end of each completed and verified version or coherent milestone, inspect the diff and
-  Git status, stage only the intended files, create a descriptive Git commit, and push it to the
-  existing `origin/main` GitHub branch without asking the user to run the commands.
+- At the end of each completed and verified code version or substantive product milestone, inspect
+  the diff and Git status, stage only the intended files, create a descriptive Git commit, and push
+  it to the existing `origin/main` GitHub branch without asking the user to run the commands.
+- Routine rule, instruction, and documentation-only updates do not require a standalone GitHub
+  push. They may remain local and be included with the next verified code version unless delaying
+  them would create a concrete safety or collaboration risk; explain that risk before publishing
+  them separately.
 - A version is not ready to commit or push until its relevant tests and checks pass, durable
   documentation is synchronized, known limitations are reported, and no secrets, local
   environments, SDKs, generated outputs, or unauthorized game content are staged.
