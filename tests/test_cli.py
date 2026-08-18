@@ -7,7 +7,11 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from galtrans.adapters.renpy import RenpyExportValidation, RenpySdkCrosscheck
+from galtrans.adapters.renpy import (
+    RenpyExportValidation,
+    RenpyLaunchValidation,
+    RenpySdkCrosscheck,
+)
 from galtrans.cli import main
 
 
@@ -18,6 +22,7 @@ class CliTests(unittest.TestCase):
             exit_code = main(["doctor"])
 
         self.assertEqual(exit_code, 0)
+        self.assertIn("GalTrans: 0.2.0", output.getvalue())
         self.assertIn("Status:   OK", output.getvalue())
 
     def test_scan_json_succeeds(self) -> None:
@@ -108,6 +113,36 @@ class CliTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertIn("导出验证：通过", output.getvalue())
         self.assertIn("2 个项目脚本已生成编译文件", output.getvalue())
+
+    def test_validate_renpy_launch_reports_window_evidence(self) -> None:
+        result = RenpyLaunchValidation(
+            sdk_root=Path("C:/sdk"),
+            version="8.5.3.26051504",
+            language="schinese",
+            source_file_count=1,
+            translation_file_count=1,
+            window_title="GalTrans sample",
+            client_width=1280,
+            client_height=720,
+            shutdown_method="window-close",
+        )
+        output = io.StringIO()
+        with (
+            mock.patch("galtrans.cli.validate_renpy_launch", return_value=result),
+            contextlib.redirect_stdout(output),
+        ):
+            exit_code = main(
+                [
+                    "validate-renpy-launch",
+                    "C:/sdk",
+                    "C:/project",
+                    "C:/export",
+                ]
+            )
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn("显示证据：GalTrans sample | 1280 x 720", output.getvalue())
+        self.assertIn("启动显示验证：通过", output.getvalue())
 
 
 

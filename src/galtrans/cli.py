@@ -14,6 +14,7 @@ from galtrans.adapters.renpy import (
     crosscheck_renpy_sdk,
     extract_renpy_path,
     validate_renpy_export,
+    validate_renpy_launch,
 )
 from galtrans.scanner import scan_project
 
@@ -56,6 +57,24 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     validation_parser.add_argument("--language", default="schinese", help="要验证的语言名")
     validation_parser.add_argument("--json", action="store_true", help="输出 JSON")
+
+    launch_parser = commands.add_parser(
+        "validate-renpy-launch",
+        help="在可写临时副本中启动 Ren'Py 并验证基础窗口显示",
+    )
+    launch_parser.add_argument("sdk", type=Path, help="Ren'Py SDK 目录或 renpy.exe")
+    launch_parser.add_argument("project", type=Path, help="包含 game 目录的 Ren'Py 源项目")
+    launch_parser.add_argument(
+        "export", type=Path, help="包含 game/tl/<language> 的独立导出根目录"
+    )
+    launch_parser.add_argument("--language", default="schinese", help="要启动的语言名")
+    launch_parser.add_argument(
+        "--timeout",
+        type=float,
+        default=30.0,
+        help="等待稳定可见窗口的秒数（默认 30）",
+    )
+    launch_parser.add_argument("--json", action="store_true", help="输出 JSON")
     return parser
 
 
@@ -210,6 +229,50 @@ def _validate_renpy_export(
     return 0
 
 
+def _validate_renpy_launch(
+    sdk: Path,
+    project: Path,
+    export: Path,
+    *,
+    language: str,
+    timeout_seconds: float,
+    as_json: bool,
+) -> int:
+    try:
+        result = validate_renpy_launch(
+            sdk,
+            project,
+            export,
+            language=language,
+            timeout_seconds=timeout_seconds,
+        )
+    except (
+        FileNotFoundError,
+        NotADirectoryError,
+        UnicodeError,
+        ValueError,
+        RenpySdkError,
+    ) as error:
+        print(f"错误：{error}", file=sys.stderr)
+        return 2
+
+    if as_json:
+        print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))
+    else:
+        print(f"Ren'Py SDK：{result.version} ({result.sdk_root})")
+        print(
+            f"临时副本：源脚本 {result.source_file_count} 个；"
+            f"翻译文件 {result.translation_file_count} 个；语言 {result.language}"
+        )
+        title = result.window_title or "（无标题）"
+        print(
+            f"显示证据：{title} | {result.client_width} x "
+            f"{result.client_height} 客户区"
+        )
+        print(f"进程收尾：{result.shutdown_method}；启动显示验证：通过")
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     if args.command == "doctor":
@@ -231,6 +294,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.project,
             args.export,
             language=args.language,
+            as_json=args.json,
+        )
+    if args.command == "validate-renpy-launch":
+        return _validate_renpy_launch(
+            args.sdk,
+            args.project,
+            args.export,
+            language=args.language,
+            timeout_seconds=args.timeout,
             as_json=args.json,
         )
     raise AssertionError(f"未处理的命令：{args.command}")

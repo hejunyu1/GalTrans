@@ -8,6 +8,7 @@ from galtrans.adapters.renpy.exporter import (
     write_official_translation_directory,
 )
 from galtrans.adapters.renpy.extractor import extract_renpy_file, extract_renpy_path
+from galtrans.adapters.renpy.launch import RenpyLaunchValidation, validate_renpy_launch
 from galtrans.adapters.renpy.renderer import (
     RenderedRenpyFragment,
     RenpyRenderError,
@@ -36,10 +37,11 @@ __all__ = [
     "RenderedRenpyFragment",
     "RenpyExportError",
     "RenpyExportValidation",
+    "RenpyLaunchValidation",
     "RenpyRenderError",
-    "RenpyTemplateError",
     "RenpySdkCrosscheck",
     "RenpySdkError",
+    "RenpyTemplateError",
     "RenpyTemplateMapping",
     "WrittenRenpyTranslationDirectory",
     "assemble_official_translation_files",
@@ -50,5 +52,6 @@ __all__ = [
     "render_official_translation_fragment",
     "resolve_renpy_sdk",
     "validate_renpy_export",
+    "validate_renpy_launch",
     "write_official_translation_directory",
 ]
