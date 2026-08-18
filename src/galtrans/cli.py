@@ -150,6 +150,10 @@ def _check_renpy_sdk(
             f"GalTrans {result.galtrans_string_count} / "
             f"Ren'Py {result.official_string_count}"
         )
+        total_segments = result.galtrans_dialogue_count + result.galtrans_string_count
+        print(f"逐条映射：{result.mapped_segment_count} / {total_segments}")
+        for warning in result.template_warnings:
+            print(f"  模板警告：{warning}", file=sys.stderr)
         print("交叉验证：" + ("一致" if result.matches else "不一致"))
     return 0 if result.matches else 4
 

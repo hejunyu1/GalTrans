@@ -10,7 +10,12 @@ from pathlib import Path
 from typing import Any
 
 from galtrans.adapters.renpy.extractor import extract_renpy_path
-from galtrans.ir import SegmentKind
+from galtrans.adapters.renpy.template import (
+    OfficialTemplateEntry,
+    RenpyTemplateError,
+    read_official_translation_templates,
+)
+from galtrans.ir import SegmentKind, TextSegment
 
 
 _VERSION_RE = re.compile(r"Ren'Py\s+(?P<version>\d+(?:\.\d+)+(?:\.\d+)*)")
@@ -27,6 +32,17 @@ class RenpySdkError(RuntimeError):
 
 
 @dataclass(frozen=True, slots=True)
+class RenpyTemplateMapping:
+    segment_id: str
+    source_file: str
+    line_number: int
+    kind: SegmentKind
+    source_text: str
+    template_file: str
+    translation_identifier: str | None
+
+
+@dataclass(frozen=True, slots=True)
 class RenpySdkCrosscheck:
     sdk_root: Path
     executable: Path
@@ -38,19 +54,31 @@ class RenpySdkCrosscheck:
     official_dialogue_count: int
     galtrans_string_count: int
     official_string_count: int
+    mappings: tuple[RenpyTemplateMapping, ...]
+    unmatched_segment_ids: tuple[str, ...]
+    unmatched_template_entries: tuple[str, ...]
+    template_warnings: tuple[str, ...]
     lint_report: str
+
+    @property
+    def mapped_segment_count(self) -> int:
+        return len(self.mappings)
 
     @property
     def matches(self) -> bool:
         return (
             self.galtrans_dialogue_count == self.official_dialogue_count
             and self.galtrans_string_count == self.official_string_count
+            and not self.unmatched_segment_ids
+            and not self.unmatched_template_entries
+            and not self.template_warnings
         )
 
     def to_dict(self) -> dict[str, Any]:
         result = asdict(self)
         result["sdk_root"] = str(self.sdk_root)
         result["executable"] = str(self.executable)
+        result["mapped_segment_count"] = self.mapped_segment_count
         result["matches"] = self.matches
         return result
 
@@ -163,34 +191,74 @@ def _mirror_sources(project_root: Path, staged_root: Path) -> int:
     return len(source_paths)
 
 
-def _official_template_counts(
-    staged_root: Path,
-    language: str,
-) -> tuple[int, int, int]:
-    translation_root = staged_root / "game" / "tl" / language
-    if not translation_root.is_dir():
-        raise RenpySdkError(f"Ren'Py 未生成翻译目录：{translation_root}")
+def _mapping_key(
+    *,
+    source_file: str,
+    line_number: int,
+    kind: SegmentKind,
+    source_text: str,
+) -> tuple[str, int, SegmentKind, str]:
+    return source_file.replace("\\", "/"), line_number, kind, source_text
 
-    template_paths = tuple(
-        path
-        for path in sorted(translation_root.rglob("*.rpy"))
-        if path.relative_to(translation_root).as_posix() != "common.rpy"
-    )
-    if not template_paths:
-        raise RenpySdkError(f"Ren'Py 未生成项目翻译模板：{translation_root}")
 
-    dialogue_re = re.compile(
-        rf"^\s*translate\s+{re.escape(language)}\s+(?!strings\b)\S+\s*:\s*$",
-        re.MULTILINE,
+def _map_template_entries(
+    segments: tuple[TextSegment, ...],
+    entries: tuple[OfficialTemplateEntry, ...],
+) -> tuple[
+    tuple[RenpyTemplateMapping, ...],
+    tuple[str, ...],
+    tuple[str, ...],
+]:
+    segments_by_key: dict[tuple[str, int, SegmentKind, str], list[TextSegment]] = {}
+    for segment in segments:
+        key = _mapping_key(
+            source_file=segment.source_file,
+            line_number=segment.line_number,
+            kind=segment.kind,
+            source_text=segment.source_text,
+        )
+        segments_by_key.setdefault(key, []).append(segment)
+
+    mappings: list[RenpyTemplateMapping] = []
+    mapped_segment_ids: set[str] = set()
+    unmatched_entries: list[str] = []
+    for entry in entries:
+        key = _mapping_key(
+            source_file=entry.source_file,
+            line_number=entry.line_number,
+            kind=entry.kind,
+            source_text=entry.source_text,
+        )
+        candidates = [
+            segment
+            for segment in segments_by_key.get(key, [])
+            if segment.id not in mapped_segment_ids
+        ]
+        if len(candidates) != 1:
+            unmatched_entries.append(
+                f"{entry.template_file}:{entry.source_file}:{entry.line_number}:"
+                f"{entry.kind.value}:{entry.source_text}"
+            )
+            continue
+
+        segment = candidates[0]
+        mapped_segment_ids.add(segment.id)
+        mappings.append(
+            RenpyTemplateMapping(
+                segment_id=segment.id,
+                source_file=segment.source_file,
+                line_number=segment.line_number,
+                kind=segment.kind,
+                source_text=segment.source_text,
+                template_file=entry.template_file,
+                translation_identifier=entry.translation_identifier,
+            )
+        )
+
+    unmatched_segment_ids = tuple(
+        segment.id for segment in segments if segment.id not in mapped_segment_ids
     )
-    string_re = re.compile(r"^\s*old\s+['\"]", re.MULTILINE)
-    dialogue_count = 0
-    string_count = 0
-    for path in template_paths:
-        text = path.read_text(encoding="utf-8-sig", errors="strict")
-        dialogue_count += len(dialogue_re.findall(text))
-        string_count += len(string_re.findall(text))
-    return len(template_paths), dialogue_count, string_count
+    return tuple(mappings), unmatched_segment_ids, tuple(unmatched_entries)
 
 
 def crosscheck_renpy_sdk(
@@ -231,15 +299,16 @@ def crosscheck_renpy_sdk(
         save_root = staged_root / ".renpy-saves"
 
         extraction_results = extract_renpy_path(staged_root)
+        segments = tuple(
+            segment for result in extraction_results for segment in result.segments
+        )
         galtrans_dialogue_count = sum(
             segment.kind in {SegmentKind.DIALOGUE, SegmentKind.NARRATION}
-            for result in extraction_results
-            for segment in result.segments
+            for segment in segments
         )
         galtrans_string_count = sum(
             segment.kind is SegmentKind.MENU_CHOICE
-            for result in extraction_results
-            for segment in result.segments
+            for segment in segments
         )
 
         _run_sdk(
@@ -254,8 +323,22 @@ def crosscheck_renpy_sdk(
             ],
             timeout_seconds=timeout_seconds,
         )
-        template_file_count, official_dialogue_count, official_string_count = (
-            _official_template_counts(staged_root, language)
+        try:
+            official_template = read_official_translation_templates(
+                staged_root / "game" / "tl" / language,
+                language,
+            )
+        except RenpyTemplateError as error:
+            raise RenpySdkError(str(error)) from error
+        official_dialogue_count = sum(
+            entry.kind in {SegmentKind.DIALOGUE, SegmentKind.NARRATION}
+            for entry in official_template.entries
+        )
+        official_string_count = sum(
+            entry.kind is SegmentKind.MENU_CHOICE for entry in official_template.entries
+        )
+        mappings, unmatched_segment_ids, unmatched_template_entries = (
+            _map_template_entries(segments, official_template.entries)
         )
 
         lint_result = _run_sdk(
@@ -277,10 +360,14 @@ def crosscheck_renpy_sdk(
         version=version_match.group("version"),
         language=language,
         source_file_count=source_file_count,
-        template_file_count=template_file_count,
+        template_file_count=len(official_template.template_files),
         galtrans_dialogue_count=galtrans_dialogue_count,
         official_dialogue_count=official_dialogue_count,
         galtrans_string_count=galtrans_string_count,
         official_string_count=official_string_count,
+        mappings=mappings,
+        unmatched_segment_ids=unmatched_segment_ids,
+        unmatched_template_entries=unmatched_template_entries,
+        template_warnings=official_template.warnings,
         lint_report=lint_report,
     )

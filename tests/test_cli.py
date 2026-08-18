@@ -65,6 +65,10 @@ class CliTests(unittest.TestCase):
             official_dialogue_count=1,
             galtrans_string_count=1,
             official_string_count=1,
+            mappings=(),
+            unmatched_segment_ids=("seg_missing",),
+            unmatched_template_entries=(),
+            template_warnings=(),
             lint_report="lint report",
         )
         output = io.StringIO()

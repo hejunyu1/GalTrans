@@ -65,7 +65,7 @@ _IGNORED_DIRECTORIES = {".git", ".venv", "__pycache__", "galtrans-output", "node
 
 
 @dataclass(frozen=True, slots=True)
-class _StringLiteral:
+class RenpyStringLiteral:
     start: int
     end: int
     body: str
@@ -76,8 +76,9 @@ def _indentation(line: str) -> int:
     return len(expanded) - len(expanded.lstrip(" "))
 
 
-def _find_string_literals(line: str) -> tuple[_StringLiteral, ...]:
-    literals: list[_StringLiteral] = []
+def find_renpy_string_literals(line: str) -> tuple[RenpyStringLiteral, ...]:
+    """Find conservatively parsed string literals in one Ren'Py source line."""
+    literals: list[RenpyStringLiteral] = []
     index = 0
     while index < len(line):
         character = line[index]
@@ -96,7 +97,13 @@ def _find_string_literals(line: str) -> tuple[_StringLiteral, ...]:
                 index += 2
                 continue
             if index < len(line) and line[index] == quote:
-                literals.append(_StringLiteral(start=start, end=index + 1, body=line[body_start:index]))
+                literals.append(
+                    RenpyStringLiteral(
+                        start=start,
+                        end=index + 1,
+                        body=line[body_start:index],
+                    )
+                )
                 index += 1
                 break
             index += 1
@@ -178,7 +185,7 @@ def _character_definitions(lines: list[str]) -> tuple[CharacterDefinition, ...]:
         match = _CHARACTER_RE.match(line)
         if match is None:
             continue
-        literals = _find_string_literals(line[match.end() :])
+        literals = find_renpy_string_literals(line[match.end() :])
         if not literals:
             continue
         definitions.append(
@@ -314,7 +321,7 @@ def extract_renpy_file(path: Path, *, source_name: str | None = None) -> Extract
             menu_indents.append(indent)
             continue
 
-        literals = _find_string_literals(stripped)
+        literals = find_renpy_string_literals(stripped)
         if not literals:
             continue
 

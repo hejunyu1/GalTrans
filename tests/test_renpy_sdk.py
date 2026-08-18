@@ -77,13 +77,16 @@ class RenpySdkTests(unittest.TestCase):
                     translation = staged_root / "game" / "tl" / "schinese" / "script.rpy"
                     translation.parent.mkdir(parents=True)
                     translation.write_text(
+                        "# game/script.rpy:2\n"
                         "translate schinese start_first:\n\n"
                         '    # "Hello"\n'
                         '    "Hello"\n\n'
+                        "# game/script.rpy:5\n"
                         "translate schinese start_second:\n\n"
                         '    # "Done"\n'
                         '    "Done"\n\n'
                         "translate schinese strings:\n\n"
+                        "    # game/script.rpy:4\n"
                         '    old "Yes"\n'
                         '    new "Yes"\n',
                         encoding="utf-8",
@@ -116,6 +119,14 @@ class RenpySdkTests(unittest.TestCase):
         self.assertEqual(result.official_dialogue_count, 2)
         self.assertEqual(result.galtrans_string_count, 1)
         self.assertEqual(result.official_string_count, 1)
+        self.assertEqual(result.mapped_segment_count, 3)
+        self.assertEqual(result.unmatched_segment_ids, ())
+        self.assertEqual(result.unmatched_template_entries, ())
+        self.assertEqual(result.template_warnings, ())
+        self.assertEqual(
+            [mapping.translation_identifier for mapping in result.mappings],
+            ["start_first", "start_second", None],
+        )
         self.assertEqual(result.lint_report, "Ren'Py 8.5.3 lint report")
 
     def test_rejects_traceback_even_when_sdk_returns_zero(self) -> None:
@@ -172,6 +183,77 @@ class RenpySdkTests(unittest.TestCase):
 
             self.assertFalse(result.matches)
             self.assertEqual((project_root / "game" / "script.rpy").read_bytes(), original_source)
+
+    def test_same_counts_with_wrong_text_do_not_match(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            sdk_root = self._make_sdk(root)
+            project_root, _ = self._make_project(root)
+
+            def fake_run(
+                command: list[str],
+                **_: object,
+            ) -> subprocess.CompletedProcess[str]:
+                if command[1:] == ["--version"]:
+                    return subprocess.CompletedProcess(
+                        command,
+                        0,
+                        stdout="Ren'Py 8.5.3.26051504\n",
+                        stderr="",
+                    )
+                if "translate" in command:
+                    staged_root = Path(command[1])
+                    translation = staged_root / "game" / "tl" / "schinese" / "script.rpy"
+                    translation.parent.mkdir(parents=True)
+                    translation.write_text(
+                        "# game/script.rpy:2\n"
+                        "translate schinese start_first:\n\n"
+                        '    # "Wrong"\n'
+                        '    "Wrong"\n\n'
+                        "# game/script.rpy:5\n"
+                        "translate schinese start_second:\n\n"
+                        '    # "Done"\n'
+                        '    "Done"\n\n'
+                        "translate schinese strings:\n\n"
+                        "    # game/script.rpy:4\n"
+                        '    old "Yes"\n'
+                        '    new "Yes"\n',
+                        encoding="utf-8",
+                    )
+                return subprocess.CompletedProcess(command, 0, stdout="lint report\n", stderr="")
+
+            with mock.patch(
+                "galtrans.adapters.renpy.sdk.subprocess.run",
+                side_effect=fake_run,
+            ):
+                result = crosscheck_renpy_sdk(sdk_root, project_root)
+
+        self.assertEqual(result.galtrans_dialogue_count, result.official_dialogue_count)
+        self.assertEqual(result.galtrans_string_count, result.official_string_count)
+        self.assertFalse(result.matches)
+        self.assertEqual(result.mapped_segment_count, 2)
+        self.assertEqual(len(result.unmatched_segment_ids), 1)
+        self.assertEqual(len(result.unmatched_template_entries), 1)
+
+    def test_rejects_missing_official_template(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            sdk_root = self._make_sdk(root)
+            project_root, _ = self._make_project(root)
+
+            def fake_run(
+                command: list[str],
+                **_: object,
+            ) -> subprocess.CompletedProcess[str]:
+                output = "Ren'Py 8.5.3.26051504\n" if command[1:] == ["--version"] else "ok\n"
+                return subprocess.CompletedProcess(command, 0, stdout=output, stderr="")
+
+            with mock.patch(
+                "galtrans.adapters.renpy.sdk.subprocess.run",
+                side_effect=fake_run,
+            ):
+                with self.assertRaisesRegex(RenpySdkError, "翻译模板目录不存在"):
+                    crosscheck_renpy_sdk(sdk_root, project_root)
 
     def test_rejects_empty_lint_report(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
