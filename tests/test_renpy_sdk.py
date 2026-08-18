@@ -10,6 +10,7 @@ from galtrans.adapters.renpy.sdk import (
     RenpySdkError,
     crosscheck_renpy_sdk,
     resolve_renpy_sdk,
+    validate_renpy_export,
 )
 
 
@@ -28,6 +29,17 @@ class RenpySdkTests(unittest.TestCase):
         source = b'''label start:\n    "Hello, [name]"\n    menu:\n        "Yes":\n            "Done"\n'''
         (game_root / "script.rpy").write_bytes(source)
         return project_root, source
+
+    def _make_export(self, root: Path) -> tuple[Path, bytes]:
+        export_root = root / "export"
+        translation = export_root / "game" / "tl" / "schinese" / "script.rpy"
+        translation.parent.mkdir(parents=True)
+        contents = (
+            b"\xef\xbb\xbftranslate schinese start_first:\n"
+            b'    "Translated, [name]"\n'
+        )
+        translation.write_bytes(contents)
+        return export_root, contents
 
     def test_resolves_nested_sdk_root_from_outer_directory(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -290,6 +302,124 @@ class RenpySdkTests(unittest.TestCase):
             ):
                 with self.assertRaisesRegex(RenpySdkError, "没有生成可检查的报告"):
                     crosscheck_renpy_sdk(sdk_root, project_root)
+
+    def test_validates_export_in_writable_temporary_sdk_and_project_copies(self) -> None:
+        commands: list[list[str]] = []
+        temporary_roots: set[Path] = set()
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            sdk_root = self._make_sdk(root)
+            sdk_sentinel = sdk_root / "renpy" / "common.rpy"
+            sdk_sentinel.write_text("# sdk source\n", encoding="utf-8")
+            project_root, original_source = self._make_project(root)
+            export_root, original_translation = self._make_export(root)
+
+            def fake_run(
+                command: list[str],
+                **_: object,
+            ) -> subprocess.CompletedProcess[str]:
+                commands.append(command)
+                copied_executable = Path(command[0])
+                self.assertNotEqual(copied_executable, sdk_root / "renpy.exe")
+                self.assertEqual(copied_executable.parent.name, "sdk")
+                temporary_roots.add(copied_executable.parent.parent)
+                if command[1:] == ["--version"]:
+                    return subprocess.CompletedProcess(
+                        command,
+                        0,
+                        stdout="Ren'Py 8.5.3.26051504\n",
+                        stderr="",
+                    )
+
+                staged_project = Path(command[1])
+                self.assertNotEqual(staged_project, project_root)
+                self.assertTrue(
+                    (staged_project / "game" / "tl" / "schinese" / "script.rpy").is_file()
+                )
+                save_root = Path(command[command.index("--savedir") + 1])
+                self.assertTrue(save_root.is_relative_to(copied_executable.parent.parent))
+                if "lint" in command:
+                    for source in staged_project.rglob("*.rpy"):
+                        source.with_suffix(".rpyc").write_bytes(b"lint artifact")
+                    return subprocess.CompletedProcess(
+                        command,
+                        0,
+                        stdout="\ufeffRen'Py lint report\n",
+                        stderr="",
+                    )
+
+                self.assertIn("compile", command)
+                self.assertEqual(tuple(staged_project.rglob("*.rpyc")), ())
+                for source in staged_project.rglob("*.rpy"):
+                    source.with_suffix(".rpyc").write_bytes(b"compiled")
+                return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+            with mock.patch(
+                "galtrans.adapters.renpy.sdk.subprocess.run",
+                side_effect=fake_run,
+            ):
+                result = validate_renpy_export(sdk_root, project_root, export_root)
+
+            self.assertEqual((project_root / "game" / "script.rpy").read_bytes(), original_source)
+            self.assertEqual(
+                (export_root / "game" / "tl" / "schinese" / "script.rpy").read_bytes(),
+                original_translation,
+            )
+            self.assertEqual(sdk_sentinel.read_text(encoding="utf-8"), "# sdk source\n")
+            self.assertFalse((project_root / "game" / "script.rpyc").exists())
+
+        self.assertEqual(len(commands), 3)
+        self.assertTrue(all(not path.exists() for path in temporary_roots))
+        self.assertEqual(result.version, "8.5.3.26051504")
+        self.assertEqual(result.source_file_count, 1)
+        self.assertEqual(result.translation_file_count, 1)
+        self.assertEqual(result.compiled_file_count, 2)
+        self.assertEqual(result.lint_report, "Ren'Py lint report")
+
+    def test_export_validation_rejects_overlapping_or_unexpected_export_content(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            sdk_root = self._make_sdk(root)
+            project_root, _ = self._make_project(root)
+
+            with self.assertRaisesRegex(RenpySdkError, "相互独立"):
+                validate_renpy_export(
+                    sdk_root,
+                    project_root,
+                    project_root / "game",
+                )
+
+            export_root, _ = self._make_export(root)
+            unexpected = export_root / "notes.txt"
+            unexpected.write_text("not an exported script", encoding="utf-8")
+            with self.assertRaisesRegex(RenpySdkError, "语言目录以外"):
+                validate_renpy_export(sdk_root, project_root, export_root)
+
+    def test_export_validation_requires_compile_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            sdk_root = self._make_sdk(root)
+            project_root, _ = self._make_project(root)
+            export_root, _ = self._make_export(root)
+
+            def fake_run(
+                command: list[str],
+                **_: object,
+            ) -> subprocess.CompletedProcess[str]:
+                if command[1:] == ["--version"]:
+                    output = "Ren'Py 8.5.3.26051504\n"
+                elif "lint" in command:
+                    output = "lint report\n"
+                else:
+                    output = ""
+                return subprocess.CompletedProcess(command, 0, stdout=output, stderr="")
+
+            with mock.patch(
+                "galtrans.adapters.renpy.sdk.subprocess.run",
+                side_effect=fake_run,
+            ):
+                with self.assertRaisesRegex(RenpySdkError, "未生成预期编译文件"):
+                    validate_renpy_export(sdk_root, project_root, export_root)
 
 
 if __name__ == "__main__":

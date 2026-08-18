@@ -87,6 +87,22 @@ class RenpySdkCrosscheck:
         return result
 
 
+@dataclass(frozen=True, slots=True)
+class RenpyExportValidation:
+    sdk_root: Path
+    version: str
+    language: str
+    source_file_count: int
+    translation_file_count: int
+    compiled_file_count: int
+    lint_report: str
+
+    def to_dict(self) -> dict[str, Any]:
+        result = asdict(self)
+        result["sdk_root"] = str(self.sdk_root)
+        return result
+
+
 def resolve_renpy_sdk(path: Path) -> tuple[Path, Path]:
     """Resolve an SDK root without relying on the archive's directory name."""
     resolved = path.expanduser().resolve()
@@ -193,6 +209,77 @@ def _mirror_sources(project_root: Path, staged_root: Path) -> int:
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(source_path, destination)
     return len(source_paths)
+
+
+def _roots_overlap(first: Path, second: Path) -> bool:
+    return (
+        first == second
+        or first.is_relative_to(second)
+        or second.is_relative_to(first)
+    )
+
+
+def _translation_paths(export_root: Path, language: str) -> tuple[Path, ...]:
+    language_root = export_root / "game" / "tl" / language
+    if not language_root.is_dir():
+        raise RenpySdkError(
+            f"导出目录缺少预期的 Ren'Py 翻译目录：{language_root}"
+        )
+
+    paths: list[Path] = []
+    for candidate in sorted(export_root.rglob("*")):
+        is_junction = getattr(candidate, "is_junction", lambda: False)
+        if candidate.is_symlink() or is_junction():
+            raise RenpySdkError(f"导出目录不得包含链接或目录联接：{candidate}")
+        if not candidate.is_file():
+            continue
+        try:
+            candidate.relative_to(language_root)
+        except ValueError as error:
+            raise RenpySdkError(
+                f"导出目录包含预期语言目录以外的文件：{candidate}"
+            ) from error
+        if candidate.suffix.lower() != ".rpy":
+            raise RenpySdkError(f"导出目录包含非 .rpy 文件：{candidate}")
+        paths.append(candidate)
+
+    if not paths:
+        raise RenpySdkError(f"导出目录中没有可验证的 .rpy 翻译文件：{language_root}")
+    return tuple(paths)
+
+
+def _file_hashes(root: Path, paths: tuple[Path, ...]) -> dict[str, str]:
+    return {
+        path.relative_to(root).as_posix(): sha256(path.read_bytes()).hexdigest()
+        for path in paths
+    }
+
+
+def _copy_translation_files(
+    export_root: Path,
+    translation_paths: tuple[Path, ...],
+    staged_project: Path,
+    language: str,
+) -> tuple[Path, ...]:
+    language_root = export_root / "game" / "tl" / language
+    destination_root = staged_project / "game" / "tl" / language
+    destinations: list[Path] = []
+    for source in translation_paths:
+        destination = destination_root / source.relative_to(language_root)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, destination)
+        destinations.append(destination)
+    return tuple(destinations)
+
+
+def _compiled_path(source_path: Path) -> Path:
+    return source_path.with_suffix(source_path.suffix + "c")
+
+
+def _remove_project_compiled_files(staged_project: Path) -> None:
+    for pattern in ("*.rpyc", "*.rpymc"):
+        for compiled_path in staged_project.rglob(pattern):
+            compiled_path.unlink()
 
 
 def _mapping_key(
@@ -379,3 +466,141 @@ def crosscheck_renpy_sdk(
         template_warnings=official_template.warnings,
         lint_report=lint_report,
     )
+
+
+def validate_renpy_export(
+    sdk_path: Path,
+    project_path: Path,
+    export_path: Path,
+    *,
+    language: str = "schinese",
+    timeout_seconds: float = 60.0,
+) -> RenpyExportValidation:
+    """Lint and compile an exported translation in fully writable temporary copies."""
+    if not is_valid_renpy_language(language):
+        raise RenpySdkError(
+            "语言名只能包含英文字母、数字、下划线和连字符，且必须以字母开头"
+        )
+
+    project_root = project_path.expanduser().resolve()
+    export_root = export_path.expanduser().resolve()
+    if not project_root.exists():
+        raise FileNotFoundError(f"Ren'Py 项目路径不存在：{project_root}")
+    if not project_root.is_dir():
+        raise NotADirectoryError(f"Ren'Py 项目路径不是目录：{project_root}")
+    if not export_root.exists():
+        raise FileNotFoundError(f"Ren'Py 导出目录不存在：{export_root}")
+    if not export_root.is_dir():
+        raise NotADirectoryError(f"Ren'Py 导出路径不是目录：{export_root}")
+    if _roots_overlap(project_root, export_root):
+        raise RenpySdkError(
+            f"输入项目与导出目录必须相互独立：{project_root} / {export_root}"
+        )
+
+    sdk_root, _ = resolve_renpy_sdk(sdk_path)
+    for label, root in (("输入项目", project_root), ("导出目录", export_root)):
+        if _roots_overlap(sdk_root, root):
+            raise RenpySdkError(
+                f"Ren'Py SDK 与{label}必须相互独立：{sdk_root} / {root}"
+            )
+
+    project_sources = _source_paths(project_root)
+    translation_sources = _translation_paths(export_root, language)
+    project_hashes = _file_hashes(project_root, project_sources)
+    translation_hashes = _file_hashes(export_root, translation_sources)
+
+    try:
+        with tempfile.TemporaryDirectory(
+            prefix="galtrans-renpy-validation-"
+        ) as temporary_directory:
+            temporary_root = Path(temporary_directory).resolve()
+            for label, root in (
+                ("SDK", sdk_root),
+                ("输入项目", project_root),
+                ("导出目录", export_root),
+            ):
+                if _roots_overlap(temporary_root, root):
+                    raise RenpySdkError(
+                        f"系统临时目录与{label}重叠，拒绝验证：{temporary_root} / {root}"
+                    )
+
+            staged_sdk = temporary_root / "sdk"
+            staged_project = temporary_root / "project"
+            shutil.copytree(sdk_root, staged_sdk, copy_function=shutil.copyfile)
+            staged_executable = staged_sdk / "renpy.exe"
+            source_file_count = _mirror_sources(project_root, staged_project)
+            staged_translations = _copy_translation_files(
+                export_root,
+                translation_sources,
+                staged_project,
+                language,
+            )
+            staged_project_sources = tuple(
+                staged_project / source.relative_to(project_root)
+                for source in project_sources
+            )
+            expected_sources = staged_project_sources + staged_translations
+            save_root = temporary_root / "saves"
+
+            version_result = _run_sdk(
+                staged_executable,
+                staged_sdk,
+                ["--version"],
+                timeout_seconds=timeout_seconds,
+            )
+            version_output = (version_result.stdout + version_result.stderr).strip()
+            version_match = _VERSION_RE.search(version_output)
+            if version_match is None:
+                raise RenpySdkError(
+                    f"无法识别 Ren'Py SDK 版本：{version_output or '无输出'}"
+                )
+
+            lint_result = _run_sdk(
+                staged_executable,
+                staged_sdk,
+                [str(staged_project), "lint", "--savedir", str(save_root)],
+                timeout_seconds=timeout_seconds,
+            )
+            lint_report = (
+                lint_result.stdout + lint_result.stderr
+            ).lstrip("\ufeff").strip()
+            if not lint_report:
+                raise RenpySdkError("Ren'Py lint 命令没有生成可检查的报告")
+
+            _remove_project_compiled_files(staged_project)
+            _run_sdk(
+                staged_executable,
+                staged_sdk,
+                [str(staged_project), "compile", "--savedir", str(save_root)],
+                timeout_seconds=timeout_seconds,
+            )
+            missing_compiled = tuple(
+                _compiled_path(source)
+                for source in expected_sources
+                if not _compiled_path(source).is_file()
+            )
+            if missing_compiled:
+                listed = "、".join(
+                    str(path.relative_to(staged_project)) for path in missing_compiled
+                )
+                raise RenpySdkError(f"Ren'Py compile 未生成预期编译文件：{listed}")
+
+            result = RenpyExportValidation(
+                sdk_root=sdk_root,
+                version=version_match.group("version"),
+                language=language,
+                source_file_count=source_file_count,
+                translation_file_count=len(staged_translations),
+                compiled_file_count=len(expected_sources),
+                lint_report=lint_report,
+            )
+    except RenpySdkError:
+        raise
+    except OSError as error:
+        raise RenpySdkError(f"无法准备或清理 Ren'Py 临时验证副本：{error}") from error
+
+    if _file_hashes(project_root, project_sources) != project_hashes:
+        raise RenpySdkError("验证期间输入项目源脚本发生变化，结果已拒绝")
+    if _file_hashes(export_root, translation_sources) != translation_hashes:
+        raise RenpySdkError("验证期间导出翻译文件发生变化，结果已拒绝")
+    return result

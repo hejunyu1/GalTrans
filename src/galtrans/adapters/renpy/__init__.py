@@ -14,11 +14,13 @@ from galtrans.adapters.renpy.renderer import (
     render_official_translation_fragment,
 )
 from galtrans.adapters.renpy.sdk import (
+    RenpyExportValidation,
     RenpySdkCrosscheck,
     RenpySdkError,
     RenpyTemplateMapping,
     crosscheck_renpy_sdk,
     resolve_renpy_sdk,
+    validate_renpy_export,
 )
 from galtrans.adapters.renpy.template import (
     OfficialTemplate,
@@ -33,6 +35,7 @@ __all__ = [
     "RenderedRenpyFile",
     "RenderedRenpyFragment",
     "RenpyExportError",
+    "RenpyExportValidation",
     "RenpyRenderError",
     "RenpyTemplateError",
     "RenpySdkCrosscheck",
@@ -46,5 +49,6 @@ __all__ = [
     "read_official_translation_templates",
     "render_official_translation_fragment",
     "resolve_renpy_sdk",
+    "validate_renpy_export",
     "write_official_translation_directory",
 ]

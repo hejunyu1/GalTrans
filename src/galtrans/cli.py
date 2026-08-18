@@ -9,7 +9,12 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from galtrans import __version__
-from galtrans.adapters.renpy import RenpySdkError, crosscheck_renpy_sdk, extract_renpy_path
+from galtrans.adapters.renpy import (
+    RenpySdkError,
+    crosscheck_renpy_sdk,
+    extract_renpy_path,
+    validate_renpy_export,
+)
 from galtrans.scanner import scan_project
 
 
@@ -39,6 +44,18 @@ def _build_parser() -> argparse.ArgumentParser:
     sdk_parser.add_argument("project", type=Path, help="包含 game 目录的 Ren'Py 源项目")
     sdk_parser.add_argument("--language", default="schinese", help="官方模板的语言名")
     sdk_parser.add_argument("--json", action="store_true", help="输出 JSON")
+
+    validation_parser = commands.add_parser(
+        "validate-renpy-export",
+        help="在可写临时 SDK 和项目副本上 lint 并编译已导出的翻译目录",
+    )
+    validation_parser.add_argument("sdk", type=Path, help="Ren'Py SDK 目录或 renpy.exe")
+    validation_parser.add_argument("project", type=Path, help="包含 game 目录的 Ren'Py 源项目")
+    validation_parser.add_argument(
+        "export", type=Path, help="包含 game/tl/<language> 的独立导出根目录"
+    )
+    validation_parser.add_argument("--language", default="schinese", help="要验证的语言名")
+    validation_parser.add_argument("--json", action="store_true", help="输出 JSON")
     return parser
 
 
@@ -158,6 +175,41 @@ def _check_renpy_sdk(
     return 0 if result.matches else 4
 
 
+def _validate_renpy_export(
+    sdk: Path,
+    project: Path,
+    export: Path,
+    *,
+    language: str,
+    as_json: bool,
+) -> int:
+    try:
+        result = validate_renpy_export(
+            sdk,
+            project,
+            export,
+            language=language,
+        )
+    except (FileNotFoundError, NotADirectoryError, UnicodeError, RenpySdkError) as error:
+        print(f"错误：{error}", file=sys.stderr)
+        return 2
+
+    if as_json:
+        print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))
+    else:
+        print(f"Ren'Py SDK：{result.version} ({result.sdk_root})")
+        print(
+            f"临时副本：源脚本 {result.source_file_count} 个；"
+            f"翻译文件 {result.translation_file_count} 个"
+        )
+        print(
+            f"lint：命令完成；compile："
+            f"{result.compiled_file_count} 个项目脚本已生成编译文件"
+        )
+        print("导出验证：通过")
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     if args.command == "doctor":
@@ -170,6 +222,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _check_renpy_sdk(
             args.sdk,
             args.project,
+            language=args.language,
+            as_json=args.json,
+        )
+    if args.command == "validate-renpy-export":
+        return _validate_renpy_export(
+            args.sdk,
+            args.project,
+            args.export,
             language=args.language,
             as_json=args.json,
         )
