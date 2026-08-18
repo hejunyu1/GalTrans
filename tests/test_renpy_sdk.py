@@ -25,7 +25,7 @@ class RenpySdkTests(unittest.TestCase):
         project_root = root / "project"
         game_root = project_root / "game"
         game_root.mkdir(parents=True)
-        source = b'''label start:\n    "Hello"\n    menu:\n        "Yes":\n            "Done"\n'''
+        source = b'''label start:\n    "Hello, [name]"\n    menu:\n        "Yes":\n            "Done"\n'''
         (game_root / "script.rpy").write_bytes(source)
         return project_root, source
 
@@ -47,7 +47,7 @@ class RenpySdkTests(unittest.TestCase):
             with self.assertRaisesRegex(RenpySdkError, "缺少 renpy.py"):
                 resolve_renpy_sdk(executable)
 
-    def test_crosscheck_uses_temporary_mirror_and_matches_official_counts(self) -> None:
+    def test_crosscheck_uses_temporary_mirror_and_matches_official_entries(self) -> None:
         commands: list[list[str]] = []
 
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -79,8 +79,8 @@ class RenpySdkTests(unittest.TestCase):
                     translation.write_text(
                         "# game/script.rpy:2\n"
                         "translate schinese start_first:\n\n"
-                        '    # "Hello"\n'
-                        '    "Hello"\n\n'
+                        '    # "Hello, [name]"\n'
+                        '    "Hello, [name]"\n\n'
                         "# game/script.rpy:5\n"
                         "translate schinese start_second:\n\n"
                         '    # "Done"\n'
@@ -127,6 +127,8 @@ class RenpySdkTests(unittest.TestCase):
             [mapping.translation_identifier for mapping in result.mappings],
             ["start_first", "start_second", None],
         )
+        self.assertEqual(result.mappings[0].source_code, '"Hello, [name]"')
+        self.assertEqual(result.mappings[0].protected_tokens, ("[name]",))
         self.assertEqual(result.lint_report, "Ren'Py 8.5.3 lint report")
 
     def test_rejects_traceback_even_when_sdk_returns_zero(self) -> None:

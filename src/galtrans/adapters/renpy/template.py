@@ -12,10 +12,15 @@ from galtrans.ir import SegmentKind
 _TOP_SOURCE_RE = re.compile(r"^# (?P<file>.+):(?P<line>\d+)\s*$")
 _INDENTED_SOURCE_RE = re.compile(r"^\s+# (?P<file>.+):(?P<line>\d+)\s*$")
 _ORIGINAL_CODE_RE = re.compile(r"^\s+# (?P<code>.+)$")
+_LANGUAGE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*$")
 
 
 class RenpyTemplateError(ValueError):
     """Raised when official translation templates cannot be read safely."""
+
+
+def is_valid_renpy_language(language: str) -> bool:
+    return _LANGUAGE_RE.fullmatch(language) is not None
 
 
 @dataclass(frozen=True, slots=True)
@@ -26,6 +31,9 @@ class OfficialTemplateEntry:
     kind: SegmentKind
     source_text: str
     translation_identifier: str | None
+    source_code: str
+    literal_start: int
+    literal_end: int
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -97,6 +105,9 @@ def _parse_dialogue_block(
             kind=kind,
             source_text=literal.body,
             translation_identifier=identifier,
+            source_code=code,
+            literal_start=literal.start,
+            literal_end=literal.end,
         ),
         None,
     )
@@ -145,6 +156,9 @@ def _parse_string_block(
                 kind=SegmentKind.MENU_CHOICE,
                 source_text=literals[0].body,
                 translation_identifier=None,
+                source_code=literal_code,
+                literal_start=literals[0].start,
+                literal_end=literals[0].end,
             )
         )
         source_reference = None

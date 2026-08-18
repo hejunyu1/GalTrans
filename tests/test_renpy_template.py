@@ -49,6 +49,17 @@ translate schinese strings:
             [entry.translation_identifier for entry in result.entries],
             ["start_first", "start_second", None],
         )
+        self.assertEqual(
+            [entry.source_code for entry in result.entries],
+            ['aoi "こんにちは"', '"暗闇だった。"', '"返事をする"'],
+        )
+        self.assertEqual(
+            [
+                entry.source_code[entry.literal_start : entry.literal_end]
+                for entry in result.entries
+            ],
+            ['"こんにちは"', '"暗闇だった。"', '"返事をする"'],
+        )
 
     def test_warns_and_skips_multi_statement_dialogue_block(self) -> None:
         template = '''\

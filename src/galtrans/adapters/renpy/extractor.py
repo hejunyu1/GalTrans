@@ -112,7 +112,8 @@ def find_renpy_string_literals(line: str) -> tuple[RenpyStringLiteral, ...]:
     return tuple(literals)
 
 
-def _find_protected_tokens(text: str) -> tuple[ProtectedToken, ...]:
+def find_renpy_protected_tokens(text: str) -> tuple[ProtectedToken, ...]:
+    """Find Ren'Py interpolation, text-tag, and escape tokens in source text."""
     tokens: list[ProtectedToken] = []
     index = 0
     while index < len(text):
@@ -259,7 +260,7 @@ def extract_renpy_file(path: Path, *, source_name: str | None = None) -> Extract
                 speaker=speaker,
                 speaker_display=character_names.get(speaker) if speaker else None,
                 source_text=source_text,
-                protected_tokens=_find_protected_tokens(source_text),
+                protected_tokens=find_renpy_protected_tokens(source_text),
             )
         )
 

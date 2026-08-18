@@ -13,13 +13,13 @@ from galtrans.adapters.renpy.extractor import extract_renpy_path
 from galtrans.adapters.renpy.template import (
     OfficialTemplateEntry,
     RenpyTemplateError,
+    is_valid_renpy_language,
     read_official_translation_templates,
 )
 from galtrans.ir import SegmentKind, TextSegment
 
 
 _VERSION_RE = re.compile(r"Ren'Py\s+(?P<version>\d+(?:\.\d+)+(?:\.\d+)*)")
-_LANGUAGE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*$")
 _FATAL_OUTPUT_MARKERS = (
     "Traceback (most recent call last):",
     "PermissionError:",
@@ -40,6 +40,10 @@ class RenpyTemplateMapping:
     source_text: str
     template_file: str
     translation_identifier: str | None
+    source_code: str
+    literal_start: int
+    literal_end: int
+    protected_tokens: tuple[str, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -252,6 +256,10 @@ def _map_template_entries(
                 source_text=segment.source_text,
                 template_file=entry.template_file,
                 translation_identifier=entry.translation_identifier,
+                source_code=entry.source_code,
+                literal_start=entry.literal_start,
+                literal_end=entry.literal_end,
+                protected_tokens=tuple(token.value for token in segment.protected_tokens),
             )
         )
 
@@ -269,7 +277,7 @@ def crosscheck_renpy_sdk(
     timeout_seconds: float = 60.0,
 ) -> RenpySdkCrosscheck:
     """Cross-check GalTrans extraction against official output on a source-only mirror."""
-    if not _LANGUAGE_RE.fullmatch(language):
+    if not is_valid_renpy_language(language):
         raise RenpySdkError(
             "语言名只能包含英文字母、数字、下划线和连字符，且必须以字母开头"
         )
