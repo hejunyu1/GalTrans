@@ -5,7 +5,9 @@ import io
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
+from galtrans.adapters.renpy import RenpySdkCrosscheck
 from galtrans.cli import main
 
 
@@ -50,6 +52,30 @@ class CliTests(unittest.TestCase):
         self.assertEqual(first_exit_code, 0)
         self.assertEqual(second_exit_code, 3)
         self.assertIn('"source_text": "こんにちは"', contents)
+
+    def test_check_renpy_sdk_reports_mismatch_with_distinct_exit_code(self) -> None:
+        result = RenpySdkCrosscheck(
+            sdk_root=Path("C:/sdk"),
+            executable=Path("C:/sdk/renpy.exe"),
+            version="8.5.3.26051504",
+            language="schinese",
+            source_file_count=1,
+            template_file_count=1,
+            galtrans_dialogue_count=2,
+            official_dialogue_count=1,
+            galtrans_string_count=1,
+            official_string_count=1,
+            lint_report="lint report",
+        )
+        output = io.StringIO()
+        with (
+            mock.patch("galtrans.cli.crosscheck_renpy_sdk", return_value=result),
+            contextlib.redirect_stdout(output),
+        ):
+            exit_code = main(["check-renpy-sdk", "C:/sdk", "C:/project"])
+
+        self.assertEqual(exit_code, 4)
+        self.assertIn("交叉验证：不一致", output.getvalue())
 
 
 

@@ -9,7 +9,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from galtrans import __version__
-from galtrans.adapters.renpy import extract_renpy_path
+from galtrans.adapters.renpy import RenpySdkError, crosscheck_renpy_sdk, extract_renpy_path
 from galtrans.scanner import scan_project
 
 
@@ -30,6 +30,15 @@ def _build_parser() -> argparse.ArgumentParser:
     extract_parser = commands.add_parser("extract-renpy", help="从 Ren'Py 源脚本或项目目录提取文本")
     extract_parser.add_argument("path", type=Path, help=".rpy/.rpym 文件或项目目录")
     extract_parser.add_argument("--output", "-o", type=Path, help="写入新的 JSONL 文件")
+
+    sdk_parser = commands.add_parser(
+        "check-renpy-sdk",
+        help="在临时源文件副本上用官方 SDK 交叉验证 Ren'Py 提取结果",
+    )
+    sdk_parser.add_argument("sdk", type=Path, help="Ren'Py SDK 目录或 renpy.exe")
+    sdk_parser.add_argument("project", type=Path, help="包含 game 目录的 Ren'Py 源项目")
+    sdk_parser.add_argument("--language", default="schinese", help="官方模板的语言名")
+    sdk_parser.add_argument("--json", action="store_true", help="输出 JSON")
     return parser
 
 
@@ -110,6 +119,41 @@ def _extract_renpy(path: Path, *, output: Path | None) -> int:
     return 0
 
 
+def _check_renpy_sdk(
+    sdk: Path,
+    project: Path,
+    *,
+    language: str,
+    as_json: bool,
+) -> int:
+    try:
+        result = crosscheck_renpy_sdk(sdk, project, language=language)
+    except (FileNotFoundError, NotADirectoryError, UnicodeError, RenpySdkError) as error:
+        print(f"错误：{error}", file=sys.stderr)
+        return 2
+
+    if as_json:
+        print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))
+    else:
+        print(f"Ren'Py SDK：{result.version} ({result.executable})")
+        print(
+            f"源脚本：{result.source_file_count} 个；官方模板："
+            f"{result.template_file_count} 个；lint：命令完成"
+        )
+        print(
+            "对话/旁白："
+            f"GalTrans {result.galtrans_dialogue_count} / "
+            f"Ren'Py {result.official_dialogue_count}"
+        )
+        print(
+            "菜单字符串："
+            f"GalTrans {result.galtrans_string_count} / "
+            f"Ren'Py {result.official_string_count}"
+        )
+        print("交叉验证：" + ("一致" if result.matches else "不一致"))
+    return 0 if result.matches else 4
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     if args.command == "doctor":
@@ -118,4 +162,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _scan(args.path, as_json=args.json)
     if args.command == "extract-renpy":
         return _extract_renpy(args.path, output=args.output)
+    if args.command == "check-renpy-sdk":
+        return _check_renpy_sdk(
+            args.sdk,
+            args.project,
+            language=args.language,
+            as_json=args.json,
+        )
     raise AssertionError(f"未处理的命令：{args.command}")
