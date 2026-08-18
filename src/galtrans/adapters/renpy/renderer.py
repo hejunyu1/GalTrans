@@ -21,6 +21,7 @@ class RenpyRenderError(ValueError):
 class RenderedRenpyFragment:
     template_file: str
     segment_id: str
+    language: str
     kind: SegmentKind
     translation_identifier: str | None
     requires_strings_header: bool
@@ -144,6 +145,7 @@ def render_official_translation_fragment(
     return RenderedRenpyFragment(
         template_file=mapping.template_file,
         segment_id=mapping.segment_id,
+        language=language,
         kind=mapping.kind,
         translation_identifier=mapping.translation_identifier,
         requires_strings_header=requires_strings_header,

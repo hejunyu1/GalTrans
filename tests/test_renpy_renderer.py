@@ -51,6 +51,7 @@ class RenpyRendererTests(unittest.TestCase):
         )
 
         self.assertFalse(result.requires_strings_header)
+        self.assertEqual(result.language, "schinese")
         self.assertEqual(
             result.content,
             '# game/script.rpy:8\n'
