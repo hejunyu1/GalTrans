@@ -91,10 +91,15 @@ implemented.
 - A version is not ready to commit or push until its relevant tests and checks pass, durable
   documentation is synchronized, known limitations are reported, and no secrets, local
   environments, SDKs, generated outputs, or unauthorized game content are staged.
-- On this Windows workstation, run `git push origin main` in an approved external-network Windows
-  process rather than the restricted Codex process. This lets Git use the active VPN route and the
-  existing Windows Schannel credential context. Do not reauthenticate, disable SSL verification,
-  or change the remote solely to work around a push failure.
+- On this Windows workstation, Git does not reliably inherit the Windows user proxy. While
+  `FlClashCore` is listening on `127.0.0.1:7890`, push from an approved external-network Windows
+  process with `git -c http.proxy=http://127.0.0.1:7890 push origin main`. The command-level `-c`
+  override is intentional and does not persist proxy configuration; it lets Git use the working
+  FlClash route and the existing Windows Schannel credential context. If connectivity is uncertain,
+  first verify the same route read-only with
+  `git -c http.proxy=http://127.0.0.1:7890 ls-remote origin HEAD`. Do not reauthenticate, disable
+  SSL verification, persist a proxy setting, or change the remote solely to work around a push
+  failure.
 - Never force-push, rewrite published history, delete branches or tags, or bypass branch
   protection. Do not create version tags or GitHub Releases unless the user explicitly requests
   them.
