@@ -618,6 +618,11 @@ class ValidatedTranslation:
 ProtectedTokenFinder = Callable[[str], Iterable[ProtectedToken]]
 
 
+def translation_proposal_id(proposal: TranslationProposal) -> str:
+    """Return the stable content digest used to identify one complete proposal."""
+    return _canonical_digest("proposal", proposal.to_dict())
+
+
 def validate_translation_proposal(
     task: TranslationTask,
     proposal: TranslationProposal,
@@ -659,7 +664,7 @@ def validate_translation_proposal(
         raise TranslationValidationError("译文没有按原种类、值和顺序保留受保护标记")
 
     return ValidatedTranslation(
-        proposal_id=_canonical_digest("proposal", proposal.to_dict()),
+        proposal_id=translation_proposal_id(proposal),
         task_id=task.task_id,
         batch_id=batch.batch_id,
         segment_id=segment.segment_id,
