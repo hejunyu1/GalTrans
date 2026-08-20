@@ -26,6 +26,7 @@ from galtrans.translation import (
     resume_translation_task,
     start_translation_batch,
     translation_checkpoint_from_dict,
+    translation_request_id,
 )
 
 
@@ -131,6 +132,39 @@ class TranslationBoundaryTests(unittest.TestCase):
         self.assertNotIn("line_number", request)
         self.assertNotIn("source_encoding", request)
         self.assertEqual(TranslationTask.from_dict(self.task.to_dict()), self.task)
+
+    def test_request_id_is_stable_and_scoped_to_backend_identity(self) -> None:
+        batch = self.task.batches[0]
+        request_id = translation_request_id(batch, "deterministic:test-v1")
+        changed_source_task = create_translation_task(
+            (replace(self.segments[0], source_sha256="b" * 64), self.segments[1]),
+            source_language="ja",
+            target_language="zh-Hans",
+            batch_size=1,
+        )
+
+        self.assertEqual(
+            translation_request_id(batch, "deterministic:test-v1"),
+            request_id,
+        )
+        self.assertRegex(request_id, r"^request_[0-9a-f]{24}$")
+        self.assertNotEqual(
+            translation_request_id(batch, "deterministic:test-v2"),
+            request_id,
+        )
+        self.assertNotEqual(
+            translation_request_id(self.task.batches[1], "deterministic:test-v1"),
+            request_id,
+        )
+        self.assertNotEqual(
+            translation_request_id(
+                changed_source_task.batches[0],
+                "deterministic:test-v1",
+            ),
+            request_id,
+        )
+        with self.assertRaisesRegex(TranslationSchemaError, "backend identity"):
+            translation_request_id(batch, "")
 
     def test_task_id_changes_with_source_snapshot_order_language_or_batch_policy(self) -> None:
         changed_hash = create_translation_task(

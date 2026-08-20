@@ -14,6 +14,7 @@ from galtrans.ir import ProtectedToken, ProtectedTokenKind, SegmentKind, TextSeg
 TRANSLATION_TASK_SCHEMA_VERSION = 1
 TRANSLATION_PROPOSAL_SCHEMA_VERSION = 1
 TRANSLATION_CHECKPOINT_SCHEMA_VERSION = 1
+TRANSLATION_REQUEST_SCHEMA_VERSION = 1
 
 _LANGUAGE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -266,6 +267,28 @@ class TranslationBatch:
             "target_language": self.target_language,
             "segments": [segment.to_dict() for segment in self.segments],
         }
+
+
+def translation_request_id(batch: TranslationBatch, backend_identity: str) -> str:
+    """Return a stable request identity for one exact backend configuration and batch."""
+    if (
+        not isinstance(backend_identity, str)
+        or not backend_identity
+        or len(backend_identity) > 200
+        or backend_identity != backend_identity.strip()
+        or any(ord(character) < 32 for character in backend_identity)
+    ):
+        raise TranslationSchemaError(
+            "backend identity 必须是 1 到 200 个无首尾空白或控制字符的字符串"
+        )
+    return _canonical_digest(
+        "request",
+        {
+            "schema_version": TRANSLATION_REQUEST_SCHEMA_VERSION,
+            "backend_identity": backend_identity,
+            "batch": batch.to_dict(),
+        },
+    )
 
 
 @dataclass(frozen=True, slots=True)

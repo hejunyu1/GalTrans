@@ -14,6 +14,7 @@ from galtrans.translation import (
     recover_interrupted_translation_task,
     resume_translation_task,
     start_translation_batch,
+    translation_request_id,
 )
 
 
@@ -35,10 +36,13 @@ class TranslationTaskRunner:
         store: TranslationStore,
         backend: TranslationBackend,
         proposal_validator: ProposalValidator,
+        *,
+        backend_identity: str,
     ) -> None:
         self._store = store
         self._backend = backend
         self._proposal_validator = proposal_validator
+        self._backend_identity = backend_identity
 
     def run_next_batch(self, task_id: str) -> TranslationTaskCheckpoint:
         """Run the first pending batch and atomically persist its accepted proposals."""
@@ -75,15 +79,23 @@ class TranslationTaskRunner:
             raise TranslationExecutionError("任务没有可执行批次，但尚未处于 completed")
 
         batch = next(item for item in task.batches if item.batch_id == pending.batch_id)
+        translation_request_id(batch, self._backend_identity)
         started = start_translation_batch(task, checkpoint, batch.batch_id)
         self._store.commit_checkpoint(task, checkpoint, started)
 
         try:
-            proposals = self._backend.propose(batch)
-            if not isinstance(proposals, tuple) or any(
-                not isinstance(item, TranslationProposal) for item in proposals
-            ):
-                raise TypeError("翻译后端必须返回 TranslationProposal 元组")
+            proposals = self._store.load_cached_proposals(
+                task,
+                batch,
+                self._backend_identity,
+                self._proposal_validator,
+            )
+            if proposals is None:
+                proposals = self._backend.propose(batch)
+                if not isinstance(proposals, tuple) or any(
+                    not isinstance(item, TranslationProposal) for item in proposals
+                ):
+                    raise TypeError("翻译后端必须返回 TranslationProposal 元组")
             validated = tuple(
                 self._proposal_validator(task, proposal) for proposal in proposals
             )
@@ -92,6 +104,13 @@ class TranslationTaskRunner:
                 started,
                 batch.batch_id,
                 validated,
+            )
+            self._store.store_cached_proposals(
+                task,
+                batch,
+                self._backend_identity,
+                proposals,
+                self._proposal_validator,
             )
         except Exception as error:
             self._persist_failure(task, started, batch.batch_id, error)

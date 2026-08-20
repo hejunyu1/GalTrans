@@ -15,6 +15,7 @@ from galtrans.translation import (
     TranslationBatch,
     TranslationBatchStatus,
     TranslationProposal,
+    TranslationSchemaError,
     TranslationTask,
     TranslationTaskStatus,
     create_translation_task,
@@ -112,6 +113,30 @@ class _EmptyBackend(TranslationBackend):
 
 
 class TranslationPipelineTests(unittest.TestCase):
+    def test_invalid_backend_identity_fails_before_starting_batch(self) -> None:
+        task = _task(segment_count=1)
+        backend = _RecordingBackend()
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_project = root / "input"
+            input_project.mkdir()
+            database = root / "translation.sqlite3"
+
+            with TranslationStore(database, input_project_root=input_project) as store:
+                initial = store.initialize_task(task)
+                runner = TranslationTaskRunner(
+                    store,
+                    backend,
+                    validate_renpy_translation_proposal,
+                    backend_identity="",
+                )
+                with self.assertRaisesRegex(TranslationSchemaError, "backend identity"):
+                    runner.run_next_batch(task.task_id)
+                current = store.load_task(task.task_id).checkpoint
+
+        self.assertEqual(current, initial)
+        self.assertEqual(backend.calls, [])
+
     def test_runs_one_batch_at_a_time_and_resumes_after_database_reopen(self) -> None:
         task = _task()
         first_backend = _RecordingBackend()
@@ -130,8 +155,15 @@ class TranslationPipelineTests(unittest.TestCase):
                     store,
                     first_backend,
                     validate_renpy_translation_proposal,
+                    backend_identity="deterministic:test-v1",
                 )
                 after_first = runner.run_next_batch(task.task_id)
+                cached = store.load_cached_proposals(
+                    task,
+                    task.batches[0],
+                    "deterministic:test-v1",
+                    validate_renpy_translation_proposal,
+                )
 
             self.assertEqual(after_first.status, TranslationTaskStatus.RUNNING)
             self.assertEqual(
@@ -139,6 +171,7 @@ class TranslationPipelineTests(unittest.TestCase):
                 (TranslationBatchStatus.COMPLETED, TranslationBatchStatus.PENDING),
             )
             self.assertEqual(len(first_backend.calls), 1)
+            self.assertEqual(tuple(item.segment_id for item in cached or ()), ("seg_0",))
             filtered = first_backend.calls[0].segments[0]
             self.assertFalse(hasattr(filtered, "source_file"))
             self.assertFalse(hasattr(filtered, "line_number"))
@@ -149,6 +182,7 @@ class TranslationPipelineTests(unittest.TestCase):
                     store,
                     second_backend,
                     validate_renpy_translation_proposal,
+                    backend_identity="deterministic:test-v1",
                 )
                 completed = runner.run_next_batch(task.task_id)
                 repeated = runner.run_next_batch(task.task_id)
@@ -177,6 +211,7 @@ class TranslationPipelineTests(unittest.TestCase):
                     store,
                     failing_backend,
                     validate_renpy_translation_proposal,
+                    backend_identity="deterministic:test-v1",
                 )
                 with self.assertRaisesRegex(TranslationExecutionError, "temporary failure"):
                     runner.run_next_batch(task.task_id)
@@ -189,6 +224,7 @@ class TranslationPipelineTests(unittest.TestCase):
                     store,
                     successful_backend,
                     validate_renpy_translation_proposal,
+                    backend_identity="deterministic:test-v1",
                 ).run_next_batch(task.task_id)
 
         self.assertEqual(failing_backend.calls, 1)
@@ -214,6 +250,7 @@ class TranslationPipelineTests(unittest.TestCase):
                     store,
                     backend,
                     validate_renpy_translation_proposal,
+                    backend_identity="deterministic:test-v1",
                 )
                 with self.assertRaisesRegex(TranslationExecutionError, "受保护标记"):
                     runner.run_next_batch(task.task_id)
@@ -237,6 +274,7 @@ class TranslationPipelineTests(unittest.TestCase):
                     store,
                     _EmptyBackend(),
                     validate_renpy_translation_proposal,
+                    backend_identity="deterministic:test-v1",
                 )
                 with self.assertRaisesRegex(TranslationExecutionError, "全部文本段"):
                     runner.run_next_batch(task.task_id)
@@ -266,6 +304,7 @@ class TranslationPipelineTests(unittest.TestCase):
                     store,
                     backend,
                     validate_renpy_translation_proposal,
+                    backend_identity="deterministic:test-v1",
                 )
                 with self.assertRaisesRegex(TranslationExecutionError, "显式恢复"):
                     runner.run_next_batch(task.task_id)
@@ -294,6 +333,7 @@ class TranslationPipelineTests(unittest.TestCase):
                     store,
                     backend,
                     validate_renpy_translation_proposal,
+                    backend_identity="deterministic:test-v1",
                 )
                 runner.run_next_batch(task.task_id)
                 paused = runner.pause_task(task.task_id)
@@ -306,6 +346,46 @@ class TranslationPipelineTests(unittest.TestCase):
         self.assertEqual(paused.status, TranslationTaskStatus.PAUSED)
         self.assertEqual(completed.status, TranslationTaskStatus.COMPLETED)
         self.assertEqual(len(backend.calls), 2)
+
+    def test_cached_response_completes_after_crash_without_backend_call(self) -> None:
+        task = _task(segment_count=1)
+        batch = task.batches[0]
+        initial = new_translation_checkpoint(task)
+        started = start_translation_batch(task, initial, batch.batch_id)
+        proposal = _proposal(batch)
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_project = root / "input"
+            input_project.mkdir()
+            database = root / "translation.sqlite3"
+
+            with TranslationStore(database, input_project_root=input_project) as store:
+                store.initialize_task(task)
+                store.commit_checkpoint(task, initial, started)
+                store.store_cached_proposals(
+                    task,
+                    batch,
+                    "deterministic:test-v1",
+                    (proposal,),
+                    validate_renpy_translation_proposal,
+                )
+
+            backend = _RecordingBackend()
+            with TranslationStore(database, input_project_root=input_project) as store:
+                runner = TranslationTaskRunner(
+                    store,
+                    backend,
+                    validate_renpy_translation_proposal,
+                    backend_identity="deterministic:test-v1",
+                )
+                runner.recover_interrupted_task(task.task_id)
+                runner.resume_task(task.task_id)
+                completed = runner.run_next_batch(task.task_id)
+                accepted = store.load_accepted_proposals(task.task_id)
+
+        self.assertEqual(backend.calls, [])
+        self.assertEqual(completed.status, TranslationTaskStatus.COMPLETED)
+        self.assertEqual(accepted, (proposal,))
 
 
 if __name__ == "__main__":

@@ -9,21 +9,26 @@ from pathlib import Path
 from typing import Any
 
 from galtrans.translation import (
+    TranslationBatch,
     TranslationBatchStatus,
     TranslationProposal,
     TranslationSchemaError,
+    TranslationStateError,
     TranslationTask,
     TranslationTaskCheckpoint,
     TranslationTaskStatus,
     TranslationValidationError,
     ValidatedTranslation,
+    complete_translation_batch,
     new_translation_checkpoint,
+    start_translation_batch,
     translation_checkpoint_from_dict,
     translation_proposal_id,
+    translation_request_id,
 )
 
 
-TRANSLATION_STORAGE_SCHEMA_VERSION = 1
+TRANSLATION_STORAGE_SCHEMA_VERSION = 2
 _APPLICATION_ID = 0x4754524E  # ASCII "GTRN".
 
 
@@ -62,6 +67,16 @@ def _json_object(value: str, *, location: str) -> Mapping[str, Any]:
     return decoded
 
 
+def _json_array(value: str, *, location: str) -> list[Any]:
+    try:
+        decoded = json.loads(value)
+    except json.JSONDecodeError as error:
+        raise TranslationStorageError(f"{location} 不是有效 JSON：{error}") from error
+    if not isinstance(decoded, list):
+        raise TranslationStorageError(f"{location} 必须是数组")
+    return decoded
+
+
 def _validated_task(task: TranslationTask) -> TranslationTask:
     try:
         restored = TranslationTask.from_dict(task.to_dict())
@@ -70,6 +85,56 @@ def _validated_task(task: TranslationTask) -> TranslationTask:
     if restored != task:
         raise TranslationStorageError("翻译任务序列化往返不一致")
     return restored
+
+
+def _validated_task_batch(
+    task: TranslationTask,
+    batch: TranslationBatch,
+) -> TranslationBatch:
+    expected = next(
+        (item for item in task.batches if item.batch_id == batch.batch_id),
+        None,
+    )
+    if expected is None or expected != batch:
+        raise TranslationStorageError("缓存批次不属于当前翻译任务或内容不一致")
+    return expected
+
+
+def _validated_cached_proposals(
+    task: TranslationTask,
+    batch: TranslationBatch,
+    proposals: Iterable[TranslationProposal],
+    proposal_validator: ProposalValidator,
+) -> tuple[TranslationProposal, ...]:
+    proposal_items = tuple(proposals)
+    validated_items: list[ValidatedTranslation] = []
+    by_segment: dict[str, TranslationProposal] = {}
+    try:
+        for proposal in proposal_items:
+            if not isinstance(proposal, TranslationProposal):
+                raise TranslationSchemaError("缓存结果必须只包含 TranslationProposal")
+            validated = proposal_validator(task, proposal)
+            if validated.proposal_id != translation_proposal_id(proposal):
+                raise TranslationValidationError("缓存提案验证结果的内容摘要不一致")
+            if proposal.segment_id in by_segment:
+                raise TranslationValidationError("缓存结果包含重复文本段")
+            by_segment[proposal.segment_id] = proposal
+            validated_items.append(validated)
+
+        initial = new_translation_checkpoint(task)
+        started = start_translation_batch(task, initial, batch.batch_id)
+        complete_translation_batch(
+            task,
+            started,
+            batch.batch_id,
+            validated_items,
+        )
+    except (TranslationSchemaError, TranslationStateError, TranslationValidationError) as error:
+        raise TranslationStorageError(
+            f"缓存结果不完整或验证失败：{error}"
+        ) from error
+
+    return tuple(by_segment[segment.segment_id] for segment in batch.segments)
 
 
 def _validated_checkpoint(
@@ -273,6 +338,19 @@ class TranslationStore:
                 ON translation_proposals(task_id, batch_id, segment_id)
                 """
             )
+            self._connection.execute(
+                """
+                CREATE TABLE translation_request_cache (
+                    request_id TEXT PRIMARY KEY,
+                    task_id TEXT NOT NULL,
+                    batch_id TEXT NOT NULL,
+                    backend_identity TEXT NOT NULL,
+                    batch_json TEXT NOT NULL,
+                    proposals_json TEXT NOT NULL,
+                    FOREIGN KEY (task_id) REFERENCES translation_tasks(task_id)
+                )
+                """
+            )
 
     def _validate_schema(self) -> None:
         application_id = self._connection.execute("PRAGMA application_id").fetchone()[0]
@@ -292,7 +370,11 @@ class TranslationStore:
             )
             if not row[0].startswith("sqlite_")
         }
-        expected = {"translation_tasks", "translation_proposals"}
+        expected = {
+            "translation_tasks",
+            "translation_proposals",
+            "translation_request_cache",
+        }
         if tables != expected:
             raise TranslationStorageError("GalTrans 翻译数据库表结构不完整或包含未知表")
         expected_columns = {
@@ -303,6 +385,14 @@ class TranslationStore:
                 "batch_id",
                 "segment_id",
                 "proposal_json",
+            ),
+            "translation_request_cache": (
+                "request_id",
+                "task_id",
+                "batch_id",
+                "backend_identity",
+                "batch_json",
+                "proposals_json",
             ),
         }
         for table, columns in expected_columns.items():
@@ -525,6 +615,128 @@ class TranslationStore:
                     raise TranslationStorageError(
                         f"数据库提案与任务来源记录不一致：{proposal_id}"
                     )
+
+    def store_cached_proposals(
+        self,
+        task: TranslationTask,
+        batch: TranslationBatch,
+        backend_identity: str,
+        proposals: Iterable[TranslationProposal],
+        proposal_validator: ProposalValidator,
+    ) -> str:
+        checked_task = _validated_task(task)
+        checked_batch = _validated_task_batch(checked_task, batch)
+        request_id = translation_request_id(checked_batch, backend_identity)
+        checked_proposals = _validated_cached_proposals(
+            checked_task,
+            checked_batch,
+            proposals,
+            proposal_validator,
+        )
+        task_json = _canonical_json(checked_task.to_dict())
+        batch_json = _canonical_json(checked_batch.to_dict())
+        proposals_json = json.dumps(
+            [proposal.to_dict() for proposal in checked_proposals],
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        values = (
+            checked_task.task_id,
+            checked_batch.batch_id,
+            backend_identity,
+            batch_json,
+            proposals_json,
+        )
+        with self._transaction():
+            task_row = self._connection.execute(
+                "SELECT task_json FROM translation_tasks WHERE task_id = ?",
+                (checked_task.task_id,),
+            ).fetchone()
+            if task_row is None:
+                raise TranslationStorageError(
+                    f"翻译任务尚未初始化：{checked_task.task_id}"
+                )
+            if task_row["task_json"] != task_json:
+                raise TranslationStorageError("数据库任务规范与缓存任务不一致")
+
+            existing = self._connection.execute(
+                """
+                SELECT task_id, batch_id, backend_identity, batch_json, proposals_json
+                FROM translation_request_cache WHERE request_id = ?
+                """,
+                (request_id,),
+            ).fetchone()
+            if existing is None:
+                self._connection.execute(
+                    """
+                    INSERT INTO translation_request_cache(
+                        request_id, task_id, batch_id, backend_identity,
+                        batch_json, proposals_json
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (request_id, *values),
+                )
+            elif tuple(existing) != values:
+                raise TranslationStorageError(
+                    f"请求 {request_id} 已对应不同的缓存结果"
+                )
+        return request_id
+
+    def load_cached_proposals(
+        self,
+        task: TranslationTask,
+        batch: TranslationBatch,
+        backend_identity: str,
+        proposal_validator: ProposalValidator,
+    ) -> tuple[TranslationProposal, ...] | None:
+        if self._closed:
+            raise TranslationStorageError("翻译数据库已经关闭")
+        checked_task = _validated_task(task)
+        checked_batch = _validated_task_batch(checked_task, batch)
+        request_id = translation_request_id(checked_batch, backend_identity)
+        row = self._connection.execute(
+            """
+            SELECT task_id, batch_id, backend_identity, batch_json, proposals_json
+            FROM translation_request_cache WHERE request_id = ?
+            """,
+            (request_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        batch_json = _canonical_json(checked_batch.to_dict())
+        if (
+            row["task_id"] != checked_task.task_id
+            or row["batch_id"] != checked_batch.batch_id
+            or row["backend_identity"] != backend_identity
+            or row["batch_json"] != batch_json
+        ):
+            raise TranslationStorageError(
+                f"请求缓存与任务、批次或 backend identity 不一致：{request_id}"
+            )
+
+        raw_proposals = _json_array(
+            row["proposals_json"],
+            location=f"请求缓存 {request_id} 的提案",
+        )
+        proposals: list[TranslationProposal] = []
+        try:
+            for index, raw_proposal in enumerate(raw_proposals):
+                if not isinstance(raw_proposal, dict) or any(
+                    not isinstance(key, str) for key in raw_proposal
+                ):
+                    raise TranslationSchemaError(
+                        f"请求缓存 {request_id} 的提案[{index}] 必须是字符串键对象"
+                    )
+                proposals.append(TranslationProposal.from_dict(raw_proposal))
+        except TranslationSchemaError as error:
+            raise TranslationStorageError(f"请求缓存提案 schema 损坏：{error}") from error
+        return _validated_cached_proposals(
+            checked_task,
+            checked_batch,
+            proposals,
+            proposal_validator,
+        )
 
     def load_accepted_proposals(self, task_id: str) -> tuple[TranslationProposal, ...]:
         stored = self.load_task(task_id)

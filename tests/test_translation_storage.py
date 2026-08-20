@@ -131,24 +131,129 @@ class TranslationStorageTests(unittest.TestCase):
 
         self.assertEqual(value, "keep")
 
-    def test_refuses_unknown_galtrans_storage_schema_version(self) -> None:
+    def test_refuses_previous_and_unknown_storage_schema_versions(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_project = root / "input"
+            input_project.mkdir()
+            for version in (1, 3):
+                database = root / f"translation-v{version}.sqlite3"
+                with TranslationStore(database, input_project_root=input_project):
+                    pass
+                connection = sqlite3.connect(database)
+                try:
+                    connection.execute(f"PRAGMA user_version = {version}")
+                    connection.commit()
+                finally:
+                    connection.close()
+
+                with self.subTest(version=version):
+                    with self.assertRaisesRegex(TranslationStorageError, "schema"):
+                        TranslationStore(database, input_project_root=input_project)
+                    connection = sqlite3.connect(database)
+                    try:
+                        final_version = connection.execute(
+                            "PRAGMA user_version"
+                        ).fetchone()[0]
+                    finally:
+                        connection.close()
+                    self.assertEqual(final_version, version)
+
+    def test_stores_and_revalidates_backend_scoped_cached_proposals(self) -> None:
+        task = _task()
+        proposal = _proposal(task)
+        batch = task.batches[0]
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             input_project = root / "input"
             input_project.mkdir()
             database = root / "translation.sqlite3"
 
-            with TranslationStore(database, input_project_root=input_project):
-                pass
-            connection = sqlite3.connect(database)
-            try:
-                connection.execute("PRAGMA user_version = 2")
-                connection.commit()
-            finally:
-                connection.close()
+            with TranslationStore(database, input_project_root=input_project) as store:
+                store.initialize_task(task)
+                self.assertIsNone(
+                    store.load_cached_proposals(
+                        task,
+                        batch,
+                        "deterministic:test-v1",
+                        validate_renpy_translation_proposal,
+                    )
+                )
+                request_id = store.store_cached_proposals(
+                    task,
+                    batch,
+                    "deterministic:test-v1",
+                    (proposal,),
+                    validate_renpy_translation_proposal,
+                )
+                cached = store.load_cached_proposals(
+                    task,
+                    batch,
+                    "deterministic:test-v1",
+                    validate_renpy_translation_proposal,
+                )
+                other_backend = store.load_cached_proposals(
+                    task,
+                    batch,
+                    "deterministic:test-v2",
+                    validate_renpy_translation_proposal,
+                )
 
-            with self.assertRaisesRegex(TranslationStorageError, "schema"):
-                TranslationStore(database, input_project_root=input_project)
+        self.assertRegex(request_id, r"^request_[0-9a-f]{24}$")
+        self.assertEqual(cached, (proposal,))
+        self.assertIsNone(other_backend)
+
+    def test_rejects_invalid_or_conflicting_cached_proposals(self) -> None:
+        task = _task()
+        proposal = _proposal(task)
+        batch = task.batches[0]
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_project = root / "input"
+            input_project.mkdir()
+            database = root / "translation.sqlite3"
+
+            with TranslationStore(database, input_project_root=input_project) as store:
+                store.initialize_task(task)
+                with self.assertRaisesRegex(TranslationStorageError, "验证失败"):
+                    store.store_cached_proposals(
+                        task,
+                        batch,
+                        "deterministic:test-v1",
+                        (replace(proposal, target_text="你好"),),
+                        validate_renpy_translation_proposal,
+                    )
+                store.store_cached_proposals(
+                    task,
+                    batch,
+                    "deterministic:test-v1",
+                    (proposal,),
+                    validate_renpy_translation_proposal,
+                )
+                with self.assertRaisesRegex(TranslationStorageError, "不同的缓存结果"):
+                    store.store_cached_proposals(
+                        task,
+                        batch,
+                        "deterministic:test-v1",
+                        (_proposal(task, target_text="您好，[player_name]"),),
+                        validate_renpy_translation_proposal,
+                    )
+
+                connection = sqlite3.connect(database)
+                try:
+                    connection.execute(
+                        "UPDATE translation_request_cache SET proposals_json = '[]'"
+                    )
+                    connection.commit()
+                finally:
+                    connection.close()
+                with self.assertRaisesRegex(TranslationStorageError, "完整"):
+                    store.load_cached_proposals(
+                        task,
+                        batch,
+                        "deterministic:test-v1",
+                        validate_renpy_translation_proposal,
+                    )
 
     def test_commits_validated_proposal_and_checkpoint_atomically(self) -> None:
         task = _task()
