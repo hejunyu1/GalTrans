@@ -91,6 +91,10 @@ implemented.
 - A version is not ready to commit or push until its relevant tests and checks pass, durable
   documentation is synchronized, known limitations are reported, and no secrets, local
   environments, SDKs, generated outputs, or unauthorized game content are staged.
+- On this Windows workstation, run `git push origin main` in an approved external-network Windows
+  process rather than the restricted Codex process. This lets Git use the active VPN route and the
+  existing Windows Schannel credential context. Do not reauthenticate, disable SSL verification,
+  or change the remote solely to work around a push failure.
 - Never force-push, rewrite published history, delete branches or tags, or bypass branch
   protection. Do not create version tags or GitHub Releases unless the user explicitly requests
   them.
