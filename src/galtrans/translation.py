@@ -15,6 +15,7 @@ TRANSLATION_TASK_SCHEMA_VERSION = 1
 TRANSLATION_PROPOSAL_SCHEMA_VERSION = 1
 TRANSLATION_CHECKPOINT_SCHEMA_VERSION = 1
 TRANSLATION_REQUEST_SCHEMA_VERSION = 1
+PROVIDER_RECEIPT_SCHEMA_VERSION = 1
 
 _LANGUAGE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -45,6 +46,13 @@ class TranslationBatchStatus(StrEnum):
     RUNNING = "running"
     FAILED = "failed"
     COMPLETED = "completed"
+
+
+class ProviderRequestStatus(StrEnum):
+    IN_FLIGHT = "in_flight"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    UNKNOWN = "unknown"
 
 
 def _canonical_digest(prefix: str, value: Mapping[str, Any]) -> str:
@@ -625,6 +633,126 @@ class TranslationProposal:
 
 
 @dataclass(frozen=True, slots=True)
+class ProviderRequestReceipt:
+    """Provider-observed state for one stable, idempotent request."""
+
+    schema_version: int
+    request_id: str
+    provider_request_id: str | None
+    status: ProviderRequestStatus
+    proposals: tuple[TranslationProposal, ...]
+    error: str | None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "request_id": self.request_id,
+            "provider_request_id": self.provider_request_id,
+            "status": self.status.value,
+            "proposals": [proposal.to_dict() for proposal in self.proposals],
+            "error": self.error,
+        }
+
+    @classmethod
+    def from_dict(cls, raw: Mapping[str, Any]) -> ProviderRequestReceipt:
+        _expect_keys(
+            raw,
+            {
+                "schema_version",
+                "request_id",
+                "provider_request_id",
+                "status",
+                "proposals",
+                "error",
+            },
+            location="provider receipt",
+        )
+        schema_version = _expect_integer(
+            raw["schema_version"],
+            location="provider receipt.schema_version",
+            minimum=1,
+        )
+        if schema_version != PROVIDER_RECEIPT_SCHEMA_VERSION:
+            raise TranslationSchemaError(
+                f"不支持的 Provider 回执 schema 版本：{schema_version}"
+            )
+        request_id = _expect_string(
+            raw["request_id"], location="provider receipt.request_id"
+        )
+        if re.fullmatch(r"request_[0-9a-f]{24}", request_id) is None:
+            raise TranslationSchemaError("provider receipt.request_id 格式无效")
+        provider_request_id = _expect_optional_string(
+            raw["provider_request_id"],
+            location="provider receipt.provider_request_id",
+        )
+        if provider_request_id is not None and (
+            not provider_request_id
+            or len(provider_request_id) > 200
+            or provider_request_id != provider_request_id.strip()
+            or any(ord(character) < 32 for character in provider_request_id)
+        ):
+            raise TranslationSchemaError(
+                "provider_request_id 必须是 1 到 200 个无首尾空白或控制字符的字符串"
+            )
+        status_value = _expect_string(
+            raw["status"], location="provider receipt.status"
+        )
+        try:
+            status = ProviderRequestStatus(status_value)
+        except ValueError as error:
+            raise TranslationSchemaError(
+                f"provider receipt.status 无效：{status_value}"
+            ) from error
+        raw_proposals = raw["proposals"]
+        if not isinstance(raw_proposals, list):
+            raise TranslationSchemaError("provider receipt.proposals 必须是数组")
+        proposals = tuple(
+            TranslationProposal.from_dict(
+                _expect_mapping(
+                    item,
+                    location=f"provider receipt.proposals[{index}]",
+                )
+            )
+            for index, item in enumerate(raw_proposals)
+        )
+        error_text = _expect_optional_string(
+            raw["error"], location="provider receipt.error"
+        )
+        receipt = cls(
+            schema_version=schema_version,
+            request_id=request_id,
+            provider_request_id=provider_request_id,
+            status=status,
+            proposals=proposals,
+            error=error_text,
+        )
+        receipt._validate_state()
+        return receipt
+
+    def _validate_state(self) -> None:
+        if self.status is ProviderRequestStatus.SUCCEEDED:
+            if not self.proposals or self.error is not None:
+                raise TranslationSchemaError(
+                    "成功回执必须包含提案且不能包含错误"
+                )
+            return
+        if self.proposals:
+            raise TranslationSchemaError(
+                f"{self.status.value} 回执不能包含提案"
+            )
+        if self.status is ProviderRequestStatus.IN_FLIGHT:
+            if self.provider_request_id is None or self.error is not None:
+                raise TranslationSchemaError(
+                    "在途回执必须包含 Provider 请求引用且不能包含错误"
+                )
+            return
+        if not self.error or len(self.error) > 1000:
+            raise TranslationSchemaError(
+                f"{self.status.value} 回执必须包含不超过 1000 字符的错误说明"
+            )
+
+
+@dataclass(frozen=True, slots=True)
 class ValidatedTranslation:
     proposal_id: str
     task_id: str
@@ -698,9 +826,19 @@ def validate_translation_proposal(
 
 
 class TranslationBackend(Protocol):
-    """Narrow provider seam; implementations receive only a filtered batch."""
+    """Narrow provider seam with idempotent submission and status lookup."""
 
-    def propose(self, batch: TranslationBatch) -> tuple[TranslationProposal, ...]: ...
+    def submit(
+        self,
+        batch: TranslationBatch,
+        idempotency_key: str,
+    ) -> ProviderRequestReceipt: ...
+
+    def query(
+        self,
+        idempotency_key: str,
+        provider_request_id: str | None,
+    ) -> ProviderRequestReceipt: ...
 
 
 @dataclass(frozen=True, slots=True)

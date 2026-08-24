@@ -11,7 +11,10 @@ from galtrans.adapters.renpy.extractor import find_renpy_protected_tokens
 from galtrans.ir import SegmentKind, TextSegment
 from galtrans.storage import TranslationStorageError, TranslationStore
 from galtrans.translation import (
+    PROVIDER_RECEIPT_SCHEMA_VERSION,
     TRANSLATION_PROPOSAL_SCHEMA_VERSION,
+    ProviderRequestReceipt,
+    ProviderRequestStatus,
     TranslationProposal,
     TranslationTask,
     ValidatedTranslation,
@@ -19,6 +22,7 @@ from galtrans.translation import (
     create_translation_task,
     new_translation_checkpoint,
     start_translation_batch,
+    translation_request_id,
 )
 
 
@@ -72,7 +76,160 @@ def _proposal(
     )
 
 
+def _provider_receipt(
+    task: TranslationTask,
+    status: ProviderRequestStatus,
+    *,
+    provider_request_id: str | None = None,
+    proposals: tuple[TranslationProposal, ...] = (),
+    error: str | None = None,
+) -> ProviderRequestReceipt:
+    batch = task.batches[0]
+    return ProviderRequestReceipt.from_dict(
+        {
+            "schema_version": PROVIDER_RECEIPT_SCHEMA_VERSION,
+            "request_id": translation_request_id(batch, "deterministic:test-v1"),
+            "provider_request_id": provider_request_id,
+            "status": status.value,
+            "proposals": [proposal.to_dict() for proposal in proposals],
+            "error": error,
+        }
+    )
+
+
 class TranslationStorageTests(unittest.TestCase):
+    def test_provider_receipts_are_cas_persisted_and_reopened(self) -> None:
+        task = _task()
+        batch = task.batches[0]
+        unknown = _provider_receipt(
+            task,
+            ProviderRequestStatus.UNKNOWN,
+            error="submission outcome unknown",
+        )
+        in_flight = _provider_receipt(
+            task,
+            ProviderRequestStatus.IN_FLIGHT,
+            provider_request_id="provider-123",
+        )
+        succeeded = _provider_receipt(
+            task,
+            ProviderRequestStatus.SUCCEEDED,
+            provider_request_id="provider-123",
+            proposals=(_proposal(task),),
+        )
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_project = root / "input"
+            input_project.mkdir()
+            database = root / "translation.sqlite3"
+
+            with TranslationStore(database, input_project_root=input_project) as store:
+                store.initialize_task(task)
+                stored_unknown = store.store_provider_receipt(
+                    task,
+                    batch,
+                    "deterministic:test-v1",
+                    unknown,
+                )
+                stored_in_flight = store.store_provider_receipt(
+                    task,
+                    batch,
+                    "deterministic:test-v1",
+                    in_flight,
+                    expected_receipt=unknown,
+                )
+
+            with TranslationStore(database, input_project_root=input_project) as store:
+                reopened = store.load_provider_receipt(
+                    task,
+                    batch,
+                    "deterministic:test-v1",
+                )
+                stored_succeeded = store.store_provider_receipt(
+                    task,
+                    batch,
+                    "deterministic:test-v1",
+                    succeeded,
+                    expected_receipt=in_flight,
+                )
+                with self.assertRaisesRegex(TranslationStorageError, "其他执行者"):
+                    store.store_provider_receipt(
+                        task,
+                        batch,
+                        "deterministic:test-v1",
+                        unknown,
+                        expected_receipt=in_flight,
+                    )
+
+        self.assertEqual(stored_unknown, unknown)
+        self.assertEqual(stored_in_flight, in_flight)
+        self.assertEqual(reopened, in_flight)
+        self.assertEqual(stored_succeeded, succeeded)
+
+    def test_provider_receipt_terminal_and_reference_changes_fail_closed(self) -> None:
+        task = _task()
+        batch = task.batches[0]
+        in_flight = _provider_receipt(
+            task,
+            ProviderRequestStatus.IN_FLIGHT,
+            provider_request_id="provider-123",
+        )
+        changed_reference = _provider_receipt(
+            task,
+            ProviderRequestStatus.FAILED,
+            provider_request_id="provider-456",
+            error="definitive failure",
+        )
+        succeeded = _provider_receipt(
+            task,
+            ProviderRequestStatus.SUCCEEDED,
+            provider_request_id="provider-123",
+            proposals=(_proposal(task),),
+        )
+        failed = _provider_receipt(
+            task,
+            ProviderRequestStatus.FAILED,
+            provider_request_id="provider-123",
+            error="late failure",
+        )
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_project = root / "input"
+            input_project.mkdir()
+            database = root / "translation.sqlite3"
+
+            with TranslationStore(database, input_project_root=input_project) as store:
+                store.initialize_task(task)
+                store.store_provider_receipt(
+                    task,
+                    batch,
+                    "deterministic:test-v1",
+                    in_flight,
+                )
+                with self.assertRaisesRegex(TranslationStorageError, "不能被移除或替换"):
+                    store.store_provider_receipt(
+                        task,
+                        batch,
+                        "deterministic:test-v1",
+                        changed_reference,
+                        expected_receipt=in_flight,
+                    )
+                store.store_provider_receipt(
+                    task,
+                    batch,
+                    "deterministic:test-v1",
+                    succeeded,
+                    expected_receipt=in_flight,
+                )
+                with self.assertRaisesRegex(TranslationStorageError, "不能从"):
+                    store.store_provider_receipt(
+                        task,
+                        batch,
+                        "deterministic:test-v1",
+                        failed,
+                        expected_receipt=succeeded,
+                    )
+
     def test_initializes_outside_input_and_recovers_checkpoint_after_reopen(self) -> None:
         task = _task()
         initial = new_translation_checkpoint(task)
@@ -136,7 +293,7 @@ class TranslationStorageTests(unittest.TestCase):
             root = Path(temporary_directory)
             input_project = root / "input"
             input_project.mkdir()
-            for version in (1, 3):
+            for version in (1, 2, 4):
                 database = root / f"translation-v{version}.sqlite3"
                 with TranslationStore(database, input_project_root=input_project):
                     pass

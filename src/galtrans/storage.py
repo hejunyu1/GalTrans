@@ -9,6 +9,8 @@ from pathlib import Path
 from typing import Any
 
 from galtrans.translation import (
+    ProviderRequestReceipt,
+    ProviderRequestStatus,
     TranslationBatch,
     TranslationBatchStatus,
     TranslationProposal,
@@ -28,7 +30,7 @@ from galtrans.translation import (
 )
 
 
-TRANSLATION_STORAGE_SCHEMA_VERSION = 2
+TRANSLATION_STORAGE_SCHEMA_VERSION = 3
 _APPLICATION_ID = 0x4754524E  # ASCII "GTRN".
 
 
@@ -135,6 +137,40 @@ def _validated_cached_proposals(
         ) from error
 
     return tuple(by_segment[segment.segment_id] for segment in batch.segments)
+
+
+def _validated_provider_receipt(
+    batch: TranslationBatch,
+    backend_identity: str,
+    receipt: ProviderRequestReceipt,
+) -> ProviderRequestReceipt:
+    if not isinstance(receipt, ProviderRequestReceipt):
+        raise TranslationStorageError("Provider 回执类型无效")
+    try:
+        restored = ProviderRequestReceipt.from_dict(receipt.to_dict())
+    except TranslationSchemaError as error:
+        raise TranslationStorageError(f"Provider 回执不能持久化：{error}") from error
+    if restored != receipt:
+        raise TranslationStorageError("Provider 回执序列化往返不一致")
+    request_id = translation_request_id(batch, backend_identity)
+    if receipt.request_id != request_id:
+        raise TranslationStorageError("Provider 回执的幂等键与任务批次不一致")
+    return restored
+
+
+def _provider_receipt_transition_allowed(
+    previous: ProviderRequestReceipt,
+    updated: ProviderRequestReceipt,
+    *,
+    allow_retry: bool,
+) -> bool:
+    if previous == updated:
+        return True
+    if previous.status is ProviderRequestStatus.SUCCEEDED:
+        return False
+    if previous.status is ProviderRequestStatus.FAILED:
+        return allow_retry and updated.status is ProviderRequestStatus.UNKNOWN
+    return True
 
 
 def _validated_checkpoint(
@@ -351,6 +387,19 @@ class TranslationStore:
                 )
                 """
             )
+            self._connection.execute(
+                """
+                CREATE TABLE translation_provider_requests (
+                    request_id TEXT PRIMARY KEY,
+                    task_id TEXT NOT NULL,
+                    batch_id TEXT NOT NULL,
+                    backend_identity TEXT NOT NULL,
+                    batch_json TEXT NOT NULL,
+                    receipt_json TEXT NOT NULL,
+                    FOREIGN KEY (task_id) REFERENCES translation_tasks(task_id)
+                )
+                """
+            )
 
     def _validate_schema(self) -> None:
         application_id = self._connection.execute("PRAGMA application_id").fetchone()[0]
@@ -374,6 +423,7 @@ class TranslationStore:
             "translation_tasks",
             "translation_proposals",
             "translation_request_cache",
+            "translation_provider_requests",
         }
         if tables != expected:
             raise TranslationStorageError("GalTrans 翻译数据库表结构不完整或包含未知表")
@@ -393,6 +443,14 @@ class TranslationStore:
                 "backend_identity",
                 "batch_json",
                 "proposals_json",
+            ),
+            "translation_provider_requests": (
+                "request_id",
+                "task_id",
+                "batch_id",
+                "backend_identity",
+                "batch_json",
+                "receipt_json",
             ),
         }
         for table, columns in expected_columns.items():
@@ -736,6 +794,171 @@ class TranslationStore:
             checked_batch,
             proposals,
             proposal_validator,
+        )
+
+    def store_provider_receipt(
+        self,
+        task: TranslationTask,
+        batch: TranslationBatch,
+        backend_identity: str,
+        receipt: ProviderRequestReceipt,
+        *,
+        expected_receipt: ProviderRequestReceipt | None = None,
+        allow_retry: bool = False,
+    ) -> ProviderRequestReceipt:
+        checked_task = _validated_task(task)
+        checked_batch = _validated_task_batch(checked_task, batch)
+        checked_receipt = _validated_provider_receipt(
+            checked_batch,
+            backend_identity,
+            receipt,
+        )
+        checked_expected = (
+            None
+            if expected_receipt is None
+            else _validated_provider_receipt(
+                checked_batch,
+                backend_identity,
+                expected_receipt,
+            )
+        )
+        request_id = translation_request_id(checked_batch, backend_identity)
+        task_json = _canonical_json(checked_task.to_dict())
+        batch_json = _canonical_json(checked_batch.to_dict())
+        receipt_json = _canonical_json(checked_receipt.to_dict())
+
+        with self._transaction():
+            task_row = self._connection.execute(
+                "SELECT task_json FROM translation_tasks WHERE task_id = ?",
+                (checked_task.task_id,),
+            ).fetchone()
+            if task_row is None:
+                raise TranslationStorageError(
+                    f"翻译任务尚未初始化：{checked_task.task_id}"
+                )
+            if task_row["task_json"] != task_json:
+                raise TranslationStorageError("数据库任务规范与 Provider 请求不一致")
+
+            row = self._connection.execute(
+                """
+                SELECT task_id, batch_id, backend_identity, batch_json, receipt_json
+                FROM translation_provider_requests WHERE request_id = ?
+                """,
+                (request_id,),
+            ).fetchone()
+            if row is None:
+                if checked_expected is not None:
+                    raise TranslationStorageError("Provider 请求回执不存在，不能比较更新")
+                self._connection.execute(
+                    """
+                    INSERT INTO translation_provider_requests(
+                        request_id, task_id, batch_id, backend_identity,
+                        batch_json, receipt_json
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        request_id,
+                        checked_task.task_id,
+                        checked_batch.batch_id,
+                        backend_identity,
+                        batch_json,
+                        receipt_json,
+                    ),
+                )
+                return checked_receipt
+
+            if (
+                row["task_id"] != checked_task.task_id
+                or row["batch_id"] != checked_batch.batch_id
+                or row["backend_identity"] != backend_identity
+                or row["batch_json"] != batch_json
+            ):
+                raise TranslationStorageError(
+                    f"Provider 请求与任务、批次或 backend identity 不一致：{request_id}"
+                )
+            try:
+                current_raw = ProviderRequestReceipt.from_dict(
+                    _json_object(
+                        row["receipt_json"],
+                        location=f"Provider 请求 {request_id} 的回执",
+                    )
+                )
+            except TranslationSchemaError as error:
+                raise TranslationStorageError(
+                    f"Provider 请求回执 schema 损坏：{error}"
+                ) from error
+            current = _validated_provider_receipt(
+                checked_batch,
+                backend_identity,
+                current_raw,
+            )
+            if checked_expected is None or current != checked_expected:
+                raise TranslationStorageError("Provider 请求回执已被其他执行者更新")
+            if (
+                current.provider_request_id is not None
+                and checked_receipt.provider_request_id != current.provider_request_id
+            ):
+                raise TranslationStorageError("Provider 请求引用不能被移除或替换")
+            if not _provider_receipt_transition_allowed(
+                current,
+                checked_receipt,
+                allow_retry=allow_retry,
+            ):
+                raise TranslationStorageError(
+                    f"Provider 请求不能从 {current.status.value} 转为 "
+                    f"{checked_receipt.status.value}"
+                )
+            self._connection.execute(
+                """
+                UPDATE translation_provider_requests SET receipt_json = ?
+                WHERE request_id = ?
+                """,
+                (receipt_json, request_id),
+            )
+        return checked_receipt
+
+    def load_provider_receipt(
+        self,
+        task: TranslationTask,
+        batch: TranslationBatch,
+        backend_identity: str,
+    ) -> ProviderRequestReceipt | None:
+        checked_task = _validated_task(task)
+        checked_batch = _validated_task_batch(checked_task, batch)
+        request_id = translation_request_id(checked_batch, backend_identity)
+        row = self._connection.execute(
+            """
+            SELECT task_id, batch_id, backend_identity, batch_json, receipt_json
+            FROM translation_provider_requests WHERE request_id = ?
+            """,
+            (request_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        if (
+            row["task_id"] != checked_task.task_id
+            or row["batch_id"] != checked_batch.batch_id
+            or row["backend_identity"] != backend_identity
+            or row["batch_json"] != _canonical_json(checked_batch.to_dict())
+        ):
+            raise TranslationStorageError(
+                f"Provider 请求与任务、批次或 backend identity 不一致：{request_id}"
+            )
+        try:
+            receipt = ProviderRequestReceipt.from_dict(
+                _json_object(
+                    row["receipt_json"],
+                    location=f"Provider 请求 {request_id} 的回执",
+                )
+            )
+        except TranslationSchemaError as error:
+            raise TranslationStorageError(
+                f"Provider 请求回执 schema 损坏：{error}"
+            ) from error
+        return _validated_provider_receipt(
+            checked_batch,
+            backend_identity,
+            receipt,
         )
 
     def load_accepted_proposals(self, task_id: str) -> tuple[TranslationProposal, ...]:

@@ -7,7 +7,10 @@ from galtrans.adapters.renpy import validate_renpy_translation_proposal
 from galtrans.adapters.renpy.extractor import find_renpy_protected_tokens
 from galtrans.ir import SegmentKind, TextSegment
 from galtrans.translation import (
+    PROVIDER_RECEIPT_SCHEMA_VERSION,
     TRANSLATION_PROPOSAL_SCHEMA_VERSION,
+    ProviderRequestReceipt,
+    ProviderRequestStatus,
     TranslationBackend,
     TranslationBatch,
     TranslationBatchStatus,
@@ -80,8 +83,15 @@ def _proposal(
 
 
 class _DeterministicBackend(TranslationBackend):
-    def propose(self, batch: TranslationBatch) -> tuple[TranslationProposal, ...]:
-        return tuple(
+    def __init__(self) -> None:
+        self.receipts: dict[str, ProviderRequestReceipt] = {}
+
+    def submit(
+        self,
+        batch: TranslationBatch,
+        idempotency_key: str,
+    ) -> ProviderRequestReceipt:
+        proposals = tuple(
             TranslationProposal.from_dict(
                 {
                     "schema_version": TRANSLATION_PROPOSAL_SCHEMA_VERSION,
@@ -99,6 +109,28 @@ class _DeterministicBackend(TranslationBackend):
             )
             for segment in batch.segments
         )
+        receipt = ProviderRequestReceipt.from_dict(
+            {
+                "schema_version": PROVIDER_RECEIPT_SCHEMA_VERSION,
+                "request_id": idempotency_key,
+                "provider_request_id": f"deterministic:{batch.batch_id}",
+                "status": ProviderRequestStatus.SUCCEEDED.value,
+                "proposals": [proposal.to_dict() for proposal in proposals],
+                "error": None,
+            }
+        )
+        self.receipts[idempotency_key] = receipt
+        return receipt
+
+    def query(
+        self,
+        idempotency_key: str,
+        provider_request_id: str | None,
+    ) -> ProviderRequestReceipt:
+        receipt = self.receipts[idempotency_key]
+        if provider_request_id != receipt.provider_request_id:
+            raise RuntimeError("Provider 请求引用不一致")
+        return receipt
 
 
 class TranslationBoundaryTests(unittest.TestCase):
@@ -165,6 +197,43 @@ class TranslationBoundaryTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(TranslationSchemaError, "backend identity"):
             translation_request_id(batch, "")
+
+    def test_provider_receipt_schema_is_closed_and_status_specific(self) -> None:
+        batch = self.task.batches[0]
+        request_id = translation_request_id(batch, "deterministic:test-v1")
+        base = {
+            "schema_version": PROVIDER_RECEIPT_SCHEMA_VERSION,
+            "request_id": request_id,
+            "provider_request_id": "provider-123",
+            "status": ProviderRequestStatus.IN_FLIGHT.value,
+            "proposals": [],
+            "error": None,
+        }
+
+        receipt = ProviderRequestReceipt.from_dict(base)
+        self.assertEqual(receipt.status, ProviderRequestStatus.IN_FLIGHT)
+        self.assertEqual(ProviderRequestReceipt.from_dict(receipt.to_dict()), receipt)
+
+        with self.assertRaisesRegex(TranslationSchemaError, "字段"):
+            ProviderRequestReceipt.from_dict({**base, "extra": True})
+        with self.assertRaisesRegex(TranslationSchemaError, "在途"):
+            ProviderRequestReceipt.from_dict({**base, "provider_request_id": None})
+        with self.assertRaisesRegex(TranslationSchemaError, "成功"):
+            ProviderRequestReceipt.from_dict(
+                {
+                    **base,
+                    "status": ProviderRequestStatus.SUCCEEDED.value,
+                    "proposals": [],
+                }
+            )
+        with self.assertRaisesRegex(TranslationSchemaError, "错误说明"):
+            ProviderRequestReceipt.from_dict(
+                {
+                    **base,
+                    "status": ProviderRequestStatus.UNKNOWN.value,
+                    "provider_request_id": None,
+                }
+            )
 
     def test_task_id_changes_with_source_snapshot_order_language_or_batch_policy(self) -> None:
         changed_hash = create_translation_task(
@@ -278,12 +347,16 @@ class TranslationBoundaryTests(unittest.TestCase):
 
     def test_deterministic_backend_requires_no_file_or_network_access(self) -> None:
         backend = _DeterministicBackend()
-        proposals = backend.propose(self.task.batches[0])
+        batch = self.task.batches[0]
+        request_id = translation_request_id(batch, "deterministic:test-v1")
+        receipt = backend.submit(batch, request_id)
+        repeated = backend.query(request_id, receipt.provider_request_id)
         validated = tuple(
             validate_renpy_translation_proposal(self.task, proposal)
-            for proposal in proposals
+            for proposal in receipt.proposals
         )
 
+        self.assertEqual(repeated, receipt)
         self.assertEqual([item.segment_id for item in validated], ["seg_one"])
         self.assertEqual(validated[0].target_text, "你好、[player_name]")
 
