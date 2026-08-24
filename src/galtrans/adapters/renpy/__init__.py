@@ -9,7 +9,11 @@ from galtrans.adapters.renpy.exporter import (
 )
 from galtrans.adapters.renpy.extractor import extract_renpy_file, extract_renpy_path
 from galtrans.adapters.renpy.launch import RenpyLaunchValidation, validate_renpy_launch
-from galtrans.adapters.renpy.proposals import validate_renpy_translation_proposal
+from galtrans.adapters.renpy.proposals import (
+    RenpyProposalPreparationError,
+    prepare_renpy_translation_files,
+    validate_renpy_translation_proposal,
+)
 from galtrans.adapters.renpy.renderer import (
     RenderedRenpyFragment,
     RenpyRenderError,
@@ -39,6 +43,7 @@ __all__ = [
     "RenpyExportError",
     "RenpyExportValidation",
     "RenpyLaunchValidation",
+    "RenpyProposalPreparationError",
     "RenpyRenderError",
     "RenpySdkCrosscheck",
     "RenpySdkError",
@@ -49,6 +54,7 @@ __all__ = [
     "crosscheck_renpy_sdk",
     "extract_renpy_file",
     "extract_renpy_path",
+    "prepare_renpy_translation_files",
     "read_official_translation_templates",
     "render_official_translation_fragment",
     "resolve_renpy_sdk",

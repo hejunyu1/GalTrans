@@ -91,6 +91,14 @@
     显式恢复才可同键重试，查询仍不能消歧时禁止自动重提并要求人工处理。
   - 成功回执仍只是 Provider 已返回的待验证提案；只有当前引擎校验通过后才进入结果缓存和完成
     检查点，不能获得渲染、导出、SDK 或启动权限。
+- 已完成 Ren'Py 提案的内存导出准备：
+  - 调用方必须同时提供原始 `TextSegment`、已完成任务与检查点、持久化提案和 SDK 交叉验证映射。
+  - 适配器从原始文本段重建任务身份，逐批核对检查点中的提案摘要，并再次执行当前 Ren'Py 标记
+    验证；未完成、缺失、重复或冲突的提案全部失败关闭。
+  - SDK 映射还必须与原始段的 ID、来源路径、行号、类型、原文和受保护标记一致，不能仅凭相同
+    文本猜测模板归属。
+  - 通过后只调用现有纯内存渲染器和组装器，返回 `RenderedRenpyFile`；不会调用 SDK、写目录、
+    启动游戏或授予 Provider 文件能力。
 
 ## 当前限制与下一阶段
 
@@ -106,7 +114,8 @@
 重开后查询持久化的 Provider 在途或未知回执。但仍没有翻译记忆、审计事件、费用核算、真实
 后端进程、网络、凭据、玩家工作区管理或翻译命令；确定性替身不能证明真实服务的幂等期限、
 查询保证或计费语义。执行器和存储 API 尚未被 CLI 调用，通过回执、缓存、提案验证和持久化也
-不等于获准渲染或导出。
+不等于获准渲染或导出。只有调用方显式组合完整来源证据、完成检查点、已接受提案和 SDK 映射，
+才能准备内存 Ren'Py 文件；当前仍没有从任务自动写出补丁目录的应用流程。
 
 当前输入仍必须是带 `.rpy/.rpym` 源脚本的 Ren'Py 项目，不支持普通玩家通常拿到的所有成品
 游戏，也没有玩家 GUI、自动模型翻译或一键生成可游玩副本。将这些能力写入产品方向不代表它们
@@ -171,7 +180,8 @@ GalTrans 持有，但 Harness 原型仍须等待用量和审批边界稳定，�
 [ADR 0009](decisions/0009-atomic-sqlite-translation-state.md)，单批次执行边界见
 [ADR 0010](decisions/0010-deterministic-single-batch-execution.md)，请求身份和结果缓存见
 [ADR 0011](decisions/0011-validated-translation-result-cache.md)，Provider 回执和模糊失败恢复见
-[ADR 0012](decisions/0012-provider-request-recovery-boundary.md)。
+[ADR 0012](decisions/0012-provider-request-recovery-boundary.md)，已完成提案到 Ren'Py 内存导出准备见
+[ADR 0013](decisions/0013-prepare-completed-renpy-proposals.md)。
 
 ## 稳定 ID
 
