@@ -8,6 +8,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from galtrans.qa import (
+    TranslationQualityReport,
+    TranslationQualitySchemaError,
+    TranslationQualityValidationError,
+    assess_translation_quality,
+)
 from galtrans.translation import (
     ProviderRequestReceipt,
     ProviderRequestStatus,
@@ -29,8 +35,7 @@ from galtrans.translation import (
     translation_request_id,
 )
 
-
-TRANSLATION_STORAGE_SCHEMA_VERSION = 3
+TRANSLATION_STORAGE_SCHEMA_VERSION = 4
 _APPLICATION_ID = 0x4754524E  # ASCII "GTRN".
 
 
@@ -270,7 +275,7 @@ def _validate_transition(
 
 
 class TranslationStore:
-    """Own atomic task checkpoints and accepted proposal bodies in one SQLite file."""
+    """Own atomic translation state, accepted proposals, and quality reports."""
 
     def __init__(self, database_path: Path, *, input_project_root: Path) -> None:
         project_root = input_project_root.expanduser().resolve()
@@ -400,6 +405,15 @@ class TranslationStore:
                 )
                 """
             )
+            self._connection.execute(
+                """
+                CREATE TABLE translation_quality_reports (
+                    task_id TEXT PRIMARY KEY,
+                    report_json TEXT NOT NULL,
+                    FOREIGN KEY (task_id) REFERENCES translation_tasks(task_id)
+                )
+                """
+            )
 
     def _validate_schema(self) -> None:
         application_id = self._connection.execute("PRAGMA application_id").fetchone()[0]
@@ -424,6 +438,7 @@ class TranslationStore:
             "translation_proposals",
             "translation_request_cache",
             "translation_provider_requests",
+            "translation_quality_reports",
         }
         if tables != expected:
             raise TranslationStorageError("GalTrans 翻译数据库表结构不完整或包含未知表")
@@ -452,6 +467,7 @@ class TranslationStore:
                 "batch_json",
                 "receipt_json",
             ),
+            "translation_quality_reports": ("task_id", "report_json"),
         }
         for table, columns in expected_columns.items():
             actual = tuple(
@@ -961,8 +977,10 @@ class TranslationStore:
             receipt,
         )
 
-    def load_accepted_proposals(self, task_id: str) -> tuple[TranslationProposal, ...]:
-        stored = self.load_task(task_id)
+    def _load_accepted_proposals(
+        self,
+        stored: StoredTranslationTask,
+    ) -> tuple[TranslationProposal, ...]:
         self._verify_proposal_references(stored.task, stored.checkpoint)
         proposals: list[TranslationProposal] = []
         for proposal_id in _proposal_references(stored.checkpoint):
@@ -982,3 +1000,139 @@ class TranslationStore:
                 raise TranslationStorageError(f"提案内容摘要不一致：{proposal_id}")
             proposals.append(proposal)
         return tuple(proposals)
+
+    def load_accepted_proposals(self, task_id: str) -> tuple[TranslationProposal, ...]:
+        return self._load_accepted_proposals(self.load_task(task_id))
+
+    def _quality_report_for_accepted_proposals(
+        self,
+        stored: StoredTranslationTask,
+        proposal_validator: ProposalValidator,
+    ) -> TranslationQualityReport:
+        if stored.checkpoint.status is not TranslationTaskStatus.COMPLETED:
+            raise TranslationStorageError(
+                "只有已完成并持久化全部提案的任务才能保存质量报告"
+            )
+        proposals = self._load_accepted_proposals(stored)
+        validated: list[ValidatedTranslation] = []
+        for proposal in proposals:
+            try:
+                translation = proposal_validator(stored.task, proposal)
+            except (TranslationSchemaError, TranslationValidationError) as error:
+                raise TranslationStorageError(
+                    f"质量报告引用的已接受提案未通过当前验证：{error}"
+                ) from error
+            if translation.proposal_id != translation_proposal_id(proposal):
+                raise TranslationStorageError(
+                    "质量报告提案验证结果的内容摘要不一致"
+                )
+            validated.append(translation)
+        try:
+            return assess_translation_quality(stored.task, validated)
+        except TranslationQualityValidationError as error:
+            raise TranslationStorageError(
+                f"无法从已接受提案重新计算质量报告：{error}"
+            ) from error
+
+    def store_quality_report(
+        self,
+        task: TranslationTask,
+        report: TranslationQualityReport,
+        proposal_validator: ProposalValidator,
+    ) -> TranslationQualityReport:
+        checked_task = _validated_task(task)
+        if not isinstance(report, TranslationQualityReport):
+            raise TranslationStorageError("译文质量报告类型无效")
+        try:
+            checked_report = TranslationQualityReport.from_dict(
+                checked_task,
+                report.to_dict(),
+            )
+        except TranslationQualitySchemaError as error:
+            raise TranslationStorageError(
+                f"译文质量报告不能持久化：{error}"
+            ) from error
+        if checked_report != report:
+            raise TranslationStorageError("译文质量报告序列化往返不一致")
+
+        task_json = _canonical_json(checked_task.to_dict())
+        report_json = _canonical_json(checked_report.to_dict())
+        with self._transaction():
+            row = self._connection.execute(
+                "SELECT task_json, checkpoint_json FROM translation_tasks WHERE task_id = ?",
+                (checked_task.task_id,),
+            ).fetchone()
+            if row is None:
+                raise TranslationStorageError(
+                    f"翻译任务尚未初始化：{checked_task.task_id}"
+                )
+            if row["task_json"] != task_json:
+                raise TranslationStorageError("数据库任务规范与当前质量报告任务不一致")
+            stored = self._decode_stored_task(
+                checked_task.task_id,
+                row["task_json"],
+                row["checkpoint_json"],
+            )
+            expected = self._quality_report_for_accepted_proposals(
+                stored,
+                proposal_validator,
+            )
+            if checked_report != expected:
+                raise TranslationStorageError(
+                    "译文质量报告与当前已接受提案重新计算的结果不一致"
+                )
+
+            existing = self._connection.execute(
+                "SELECT report_json FROM translation_quality_reports WHERE task_id = ?",
+                (checked_task.task_id,),
+            ).fetchone()
+            if existing is None:
+                self._connection.execute(
+                    """
+                    INSERT INTO translation_quality_reports(task_id, report_json)
+                    VALUES (?, ?)
+                    """,
+                    (checked_task.task_id, report_json),
+                )
+            elif existing["report_json"] != report_json:
+                raise TranslationStorageError(
+                    "翻译任务已有不同的持久化质量报告，拒绝覆盖"
+                )
+        return checked_report
+
+    def load_quality_report(
+        self,
+        task: TranslationTask,
+        proposal_validator: ProposalValidator,
+    ) -> TranslationQualityReport | None:
+        checked_task = _validated_task(task)
+        stored = self.load_task(checked_task.task_id)
+        if stored.task != checked_task:
+            raise TranslationStorageError("数据库任务规范与当前质量报告任务不一致")
+        row = self._connection.execute(
+            "SELECT report_json FROM translation_quality_reports WHERE task_id = ?",
+            (checked_task.task_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        try:
+            report = TranslationQualityReport.from_dict(
+                checked_task,
+                _json_object(
+                    row["report_json"],
+                    location=f"任务 {checked_task.task_id} 的质量报告",
+                ),
+            )
+        except TranslationQualitySchemaError as error:
+            raise TranslationStorageError(
+                f"数据库中的译文质量报告损坏：{error}"
+            ) from error
+        expected = self._quality_report_for_accepted_proposals(
+            stored,
+            proposal_validator,
+        )
+        if report != expected:
+            raise TranslationStorageError(
+                "数据库中的译文质量报告与当前已接受提案不一致"
+            )
+        return report

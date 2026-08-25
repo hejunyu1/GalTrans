@@ -9,6 +9,11 @@ from pathlib import Path
 from galtrans.adapters.renpy import validate_renpy_translation_proposal
 from galtrans.adapters.renpy.extractor import find_renpy_protected_tokens
 from galtrans.ir import SegmentKind, TextSegment
+from galtrans.qa import (
+    TranslationQualityOutcome,
+    TranslationQualityReport,
+    assess_translation_quality,
+)
 from galtrans.storage import TranslationStorageError, TranslationStore
 from galtrans.translation import (
     PROVIDER_RECEIPT_SCHEMA_VERSION,
@@ -57,9 +62,10 @@ def _task() -> TranslationTask:
 def _proposal(
     task: TranslationTask,
     *,
+    batch_index: int = 0,
     target_text: str = "你好，[player_name]",
 ) -> TranslationProposal:
-    batch = task.batches[0]
+    batch = task.batches[batch_index]
     segment = batch.segments[0]
     return TranslationProposal.from_dict(
         {
@@ -74,6 +80,50 @@ def _proposal(
             "target_text": target_text,
         }
     )
+
+
+def _quality_inputs(
+    task: TranslationTask,
+) -> tuple[tuple[TranslationProposal, ...], TranslationQualityReport]:
+    proposals = (
+        _proposal(
+            task,
+            batch_index=0,
+            target_text="こんにちは、[player_name]",
+        ),
+        _proposal(task, batch_index=1, target_text="再见"),
+    )
+    validated = tuple(
+        validate_renpy_translation_proposal(task, proposal)
+        for proposal in proposals
+    )
+    return proposals, assess_translation_quality(task, validated)
+
+
+def _complete_task(
+    store: TranslationStore,
+    task: TranslationTask,
+    proposals: tuple[TranslationProposal, ...],
+) -> None:
+    checkpoint = store.initialize_task(task)
+    for batch, proposal in zip(task.batches, proposals, strict=True):
+        started = start_translation_batch(task, checkpoint, batch.batch_id)
+        store.commit_checkpoint(task, checkpoint, started)
+        validated = validate_renpy_translation_proposal(task, proposal)
+        completed = complete_translation_batch(
+            task,
+            started,
+            batch.batch_id,
+            (validated,),
+        )
+        store.commit_checkpoint(
+            task,
+            started,
+            completed,
+            proposals=(proposal,),
+            proposal_validator=validate_renpy_translation_proposal,
+        )
+        checkpoint = completed
 
 
 def _provider_receipt(
@@ -293,7 +343,7 @@ class TranslationStorageTests(unittest.TestCase):
             root = Path(temporary_directory)
             input_project = root / "input"
             input_project.mkdir()
-            for version in (1, 2, 4):
+            for version in (1, 2, 3, 5):
                 database = root / f"translation-v{version}.sqlite3"
                 with TranslationStore(database, input_project_root=input_project):
                     pass
@@ -315,6 +365,185 @@ class TranslationStorageTests(unittest.TestCase):
                     finally:
                         connection.close()
                     self.assertEqual(final_version, version)
+
+    def test_quality_report_is_persisted_idempotently_and_reopened(self) -> None:
+        task = _task()
+        proposals, report = _quality_inputs(task)
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_project = root / "input"
+            input_project.mkdir()
+            source = input_project / "script.rpy"
+            source.write_bytes(b'label start:\n    "Original"\n')
+            original = source.read_bytes()
+            database = root / "translation.sqlite3"
+
+            with TranslationStore(database, input_project_root=input_project) as store:
+                _complete_task(store, task, proposals)
+                self.assertIsNone(
+                    store.load_quality_report(
+                        task,
+                        validate_renpy_translation_proposal,
+                    )
+                )
+                stored = store.store_quality_report(
+                    task,
+                    report,
+                    validate_renpy_translation_proposal,
+                )
+                repeated = store.store_quality_report(
+                    task,
+                    report,
+                    validate_renpy_translation_proposal,
+                )
+
+            with TranslationStore(database, input_project_root=input_project) as store:
+                reopened = store.load_quality_report(
+                    task,
+                    validate_renpy_translation_proposal,
+                )
+            final_source = source.read_bytes()
+
+        self.assertEqual(stored, report)
+        self.assertEqual(repeated, report)
+        self.assertEqual(reopened, report)
+        self.assertIsNotNone(reopened)
+        assert reopened is not None
+        self.assertEqual(
+            reopened.low_confidence_results[0].outcome,
+            TranslationQualityOutcome.LOW_CONFIDENCE,
+        )
+        self.assertEqual(final_source, original)
+
+    def test_quality_report_requires_completed_accepted_proposals(self) -> None:
+        task = _task()
+        proposals, report = _quality_inputs(task)
+        forged_clear = replace(
+            report,
+            results=(
+                replace(
+                    report.results[0],
+                    outcome=TranslationQualityOutcome.CLEAR,
+                    findings=(),
+                ),
+                report.results[1],
+            ),
+        )
+        alternative_proposals = (
+            _proposal(
+                task,
+                batch_index=0,
+                target_text="您好，[player_name]",
+            ),
+            proposals[1],
+        )
+        alternative_report = assess_translation_quality(
+            task,
+            tuple(
+                validate_renpy_translation_proposal(task, proposal)
+                for proposal in alternative_proposals
+            ),
+        )
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_project = root / "input"
+            input_project.mkdir()
+            database = root / "translation.sqlite3"
+
+            with TranslationStore(database, input_project_root=input_project) as store:
+                store.initialize_task(task)
+                with self.assertRaisesRegex(TranslationStorageError, "已完成"):
+                    store.store_quality_report(
+                        task,
+                        report,
+                        validate_renpy_translation_proposal,
+                    )
+
+                _complete_task(store, task, proposals)
+                for invalid_report in (forged_clear, alternative_report):
+                    with self.subTest(invalid_report=invalid_report):
+                        with self.assertRaisesRegex(
+                            TranslationStorageError,
+                            "重新计算的结果不一致",
+                        ):
+                            store.store_quality_report(
+                                task,
+                                invalid_report,
+                                validate_renpy_translation_proposal,
+                            )
+                self.assertIsNone(
+                    store.load_quality_report(
+                        task,
+                        validate_renpy_translation_proposal,
+                    )
+                )
+
+    def test_corrupted_quality_report_fails_closed_after_reopen(self) -> None:
+        task = _task()
+        proposals, report = _quality_inputs(task)
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_project = root / "input"
+            input_project.mkdir()
+            database = root / "translation.sqlite3"
+
+            with TranslationStore(database, input_project_root=input_project) as store:
+                _complete_task(store, task, proposals)
+                store.store_quality_report(
+                    task,
+                    report,
+                    validate_renpy_translation_proposal,
+                )
+
+            connection = sqlite3.connect(database)
+            try:
+                connection.execute(
+                    "UPDATE translation_quality_reports SET report_json = '{}'"
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            with TranslationStore(database, input_project_root=input_project) as store:
+                with self.assertRaisesRegex(TranslationStorageError, "质量报告损坏"):
+                    store.load_quality_report(
+                        task,
+                        validate_renpy_translation_proposal,
+                    )
+
+    def test_quality_report_rejects_missing_accepted_proposal_after_reopen(self) -> None:
+        task = _task()
+        proposals, report = _quality_inputs(task)
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_project = root / "input"
+            input_project.mkdir()
+            database = root / "translation.sqlite3"
+
+            with TranslationStore(database, input_project_root=input_project) as store:
+                _complete_task(store, task, proposals)
+                store.store_quality_report(
+                    task,
+                    report,
+                    validate_renpy_translation_proposal,
+                )
+
+            connection = sqlite3.connect(database)
+            try:
+                connection.execute(
+                    "DELETE FROM translation_proposals WHERE proposal_id = ?",
+                    (report.results[0].proposal_id,),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            with TranslationStore(database, input_project_root=input_project) as store:
+                with self.assertRaisesRegex(TranslationStorageError, "缺失的提案"):
+                    store.load_quality_report(
+                        task,
+                        validate_renpy_translation_proposal,
+                    )
 
     def test_stores_and_revalidates_backend_scoped_cached_proposals(self) -> None:
         task = _task()
