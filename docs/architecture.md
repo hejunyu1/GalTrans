@@ -91,6 +91,14 @@
     显式恢复才可同键重试，查询仍不能消歧时禁止自动重提并要求人工处理。
   - 成功回执仍只是 Provider 已返回的待验证提案；只有当前引擎校验通过后才进入结果缓存和完成
     检查点，不能获得渲染、导出、SDK 或启动权限。
+- 确定性译文质量报告：
+  - 接收完整的 `TranslationTask` 与已经过引擎校验的 `ValidatedTranslation`，重新核对任务、批次、
+    来源摘要、语言、完整覆盖和提案内容摘要。
+  - 关闭式 v1 报告按任务顺序返回 `clear` 或 `low_confidence`，并记录实际执行的版本化检查 ID 与
+    结构化问题代码；未知字段、版本、检查集合和矛盾状态失败关闭。
+  - 首条规则把 Unicode NFC 规范化后仍与原文完全相同的译文列入低置信度复核；`clear` 只表示
+    当前规则未命中，不代表语义、文风、术语或整体质量正确。
+  - 报告只在内存生成，不替代引擎标记复核、人工批准或导出权限，也不读写游戏、SQLite 或输出。
 - 已完成 Ren'Py 提案的内存导出准备：
   - 调用方必须同时提供原始 `TextSegment`、已完成任务与检查点、持久化提案和 SDK 交叉验证映射。
   - 适配器从原始文本段重建任务身份，逐批核对检查点中的提案摘要，并再次执行当前 Ren'Py 标记
@@ -115,7 +123,9 @@
 后端进程、网络、凭据、玩家工作区管理或翻译命令；确定性替身不能证明真实服务的幂等期限、
 查询保证或计费语义。执行器和存储 API 尚未被 CLI 调用，通过回执、缓存、提案验证和持久化也
 不等于获准渲染或导出。只有调用方显式组合完整来源证据、完成检查点、已接受提案和 SDK 映射，
-才能准备内存 Ren'Py 文件；当前仍没有从任务自动写出补丁目录的应用流程。
+才能准备内存 Ren'Py 文件；已经过引擎校验的完整任务可以另行生成纯内存质量报告，但当前仅有
+“译文与原文未变化”这一条保守规则，没有持久化复核或语义质量判断，也不会自动阻断或授权
+导出。当前仍没有从任务自动写出补丁目录的应用流程。
 
 当前输入仍必须是带 `.rpy/.rpym` 源脚本的 Ren'Py 项目，不支持普通玩家通常拿到的所有成品
 游戏，也没有玩家 GUI、自动模型翻译或一键生成可游玩副本。将这些能力写入产品方向不代表它们
@@ -181,7 +191,8 @@ GalTrans 持有，但 Harness 原型仍须等待用量和审批边界稳定，�
 [ADR 0010](decisions/0010-deterministic-single-batch-execution.md)，请求身份和结果缓存见
 [ADR 0011](decisions/0011-validated-translation-result-cache.md)，Provider 回执和模糊失败恢复见
 [ADR 0012](decisions/0012-provider-request-recovery-boundary.md)，已完成提案到 Ren'Py 内存导出准备见
-[ADR 0013](decisions/0013-prepare-completed-renpy-proposals.md)。
+[ADR 0013](decisions/0013-prepare-completed-renpy-proposals.md)，首个确定性质量检查与低置信度报告见
+[ADR 0014](decisions/0014-deterministic-translation-quality-boundary.md)。
 
 ## 稳定 ID
 
