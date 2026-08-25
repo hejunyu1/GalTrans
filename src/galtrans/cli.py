@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import platform
+import re
 import sqlite3
 import sys
 from collections.abc import Sequence
@@ -10,13 +12,33 @@ from pathlib import Path
 
 from galtrans import __version__
 from galtrans.adapters.renpy import (
+    RenpyExportError,
+    RenpyProposalPreparationError,
     RenpySdkError,
     crosscheck_renpy_sdk,
     extract_renpy_path,
     validate_renpy_export,
     validate_renpy_launch,
 )
+from galtrans.automated import (
+    AutomatedRenpyTranslationError,
+    AutomatedRenpyTranslationResult,
+    run_automated_renpy_translation,
+)
+from galtrans.pipeline import TranslationExecutionError
+from galtrans.providers import (
+    OpenAICompatibleChatBackend,
+    OpenAICompatibleProviderError,
+)
 from galtrans.scanner import scan_project
+from galtrans.storage import TranslationStorageError
+from galtrans.translation import (
+    TranslationSchemaError,
+    TranslationStateError,
+    TranslationValidationError,
+)
+
+_ENVIRONMENT_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -75,6 +97,61 @@ def _build_parser() -> argparse.ArgumentParser:
         help="等待稳定可见窗口的秒数（默认 30）",
     )
     launch_parser.add_argument("--json", action="store_true", help="输出 JSON")
+
+    translate_parser = commands.add_parser(
+        "translate-renpy",
+        help="通过 OpenAI 兼容 Provider 自动翻译并验证 source-only Ren'Py 项目",
+    )
+    translate_parser.add_argument("sdk", type=Path, help="Ren'Py SDK 目录或 renpy.exe")
+    translate_parser.add_argument("project", type=Path, help="包含 game 目录的 Ren'Py 源项目")
+    translate_parser.add_argument("output", type=Path, help="必须尚不存在的独立输出目录")
+    translate_parser.add_argument(
+        "--workspace",
+        type=Path,
+        help="输入项目之外的任务工作区；默认位于输出目录旁",
+    )
+    translate_parser.add_argument(
+        "--endpoint",
+        help="Chat Completions URL；也可用 GALTRANS_API_ENDPOINT 环境变量",
+    )
+    translate_parser.add_argument(
+        "--model",
+        help="模型名；也可用 GALTRANS_MODEL 环境变量",
+    )
+    translate_parser.add_argument(
+        "--api-key-env",
+        default="GALTRANS_API_KEY",
+        help="保存 API key 的环境变量名（默认 GALTRANS_API_KEY）",
+    )
+    translate_parser.add_argument("--source-language", default="ja", help="源语言")
+    translate_parser.add_argument(
+        "--language", default="schinese", help="目标语言和 Ren'Py 语言名"
+    )
+    translate_parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=8,
+        help="每次 Provider 请求的文本段数量（默认 8）",
+    )
+    translate_parser.add_argument(
+        "--provider-timeout",
+        type=float,
+        default=120.0,
+        help="单次 Provider 请求超时秒数（默认 120）",
+    )
+    translate_parser.add_argument(
+        "--sdk-timeout",
+        type=float,
+        default=60.0,
+        help="单次 Ren'Py SDK 命令超时秒数（默认 60）",
+    )
+    translate_parser.add_argument(
+        "--max-attempts",
+        type=int,
+        default=2,
+        help="Provider 明确失败时的总尝试次数（默认 2）",
+    )
+    translate_parser.add_argument("--json", action="store_true", help="输出 JSON")
     return parser
 
 
@@ -273,6 +350,127 @@ def _validate_renpy_launch(
     return 0
 
 
+def _automatic_workspace(output: Path, workspace: Path | None) -> Path:
+    if workspace is not None:
+        return workspace
+    expanded_output = output.expanduser()
+    return expanded_output.parent / f".{expanded_output.name}.galtrans"
+
+
+def _translate_renpy(
+    sdk: Path,
+    project: Path,
+    output: Path,
+    *,
+    workspace: Path | None,
+    endpoint: str | None,
+    model: str | None,
+    api_key_environment: str,
+    source_language: str,
+    target_language: str,
+    batch_size: int,
+    provider_timeout_seconds: float,
+    sdk_timeout_seconds: float,
+    max_attempts: int,
+    as_json: bool,
+) -> int:
+    resolved_endpoint = endpoint or os.environ.get("GALTRANS_API_ENDPOINT")
+    resolved_model = model or os.environ.get("GALTRANS_MODEL")
+    if not resolved_endpoint:
+        print(
+            "错误：请用 --endpoint 或 GALTRANS_API_ENDPOINT 配置 Provider URL",
+            file=sys.stderr,
+        )
+        return 2
+    if not resolved_model:
+        print(
+            "错误：请用 --model 或 GALTRANS_MODEL 配置模型名",
+            file=sys.stderr,
+        )
+        return 2
+    if _ENVIRONMENT_NAME_RE.fullmatch(api_key_environment) is None:
+        print("错误：--api-key-env 不是有效的环境变量名", file=sys.stderr)
+        return 2
+    api_key = os.environ.get(api_key_environment)
+    if not api_key:
+        print(
+            f"错误：环境变量 {api_key_environment} 没有配置 API key",
+            file=sys.stderr,
+        )
+        return 2
+
+    try:
+        backend = OpenAICompatibleChatBackend(
+            endpoint=resolved_endpoint,
+            model=resolved_model,
+            api_key=api_key,
+            timeout_seconds=provider_timeout_seconds,
+        )
+        os.environ.pop(api_key_environment, None)
+        try:
+            result = run_automated_renpy_translation(
+                sdk,
+                project,
+                output,
+                _automatic_workspace(output, workspace),
+                backend,
+                backend_identity=backend.identity,
+                source_language=source_language,
+                target_language=target_language,
+                batch_size=batch_size,
+                max_definitive_attempts=max_attempts,
+                sdk_timeout_seconds=sdk_timeout_seconds,
+            )
+        finally:
+            os.environ[api_key_environment] = api_key
+    except FileExistsError as error:
+        print(f"错误：{error}", file=sys.stderr)
+        return 3
+    except (
+        FileNotFoundError,
+        NotADirectoryError,
+        OSError,
+        UnicodeError,
+        AutomatedRenpyTranslationError,
+        OpenAICompatibleProviderError,
+        RenpyExportError,
+        RenpyProposalPreparationError,
+        RenpySdkError,
+        TranslationExecutionError,
+        TranslationSchemaError,
+        TranslationStateError,
+        TranslationStorageError,
+        TranslationValidationError,
+    ) as error:
+        print(f"错误：{error}", file=sys.stderr)
+        return 2
+
+    _print_automated_result(result, as_json=as_json)
+    return 0
+
+
+def _print_automated_result(
+    result: AutomatedRenpyTranslationResult,
+    *,
+    as_json: bool,
+) -> None:
+    if as_json:
+        print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))
+        return
+    print(
+        f"自动翻译：{result.segment_count} 条文本，"
+        f"{result.batch_count} 个批次；任务 {result.task_id}"
+    )
+    print(
+        f"质量检查：{result.quality_outcome.value}；"
+        f"低置信度 {len(result.low_confidence_segment_ids)} 条"
+    )
+    print(f"独立输出：{result.output_root}")
+    print(f"翻译文件：{len(result.translation_files)} 个")
+    print(f"Ren'Py {result.sdk_version} lint 与 compile：通过")
+    print(f"可恢复工作区：{result.workspace_root}")
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     if args.command == "doctor":
@@ -303,6 +501,23 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.export,
             language=args.language,
             timeout_seconds=args.timeout,
+            as_json=args.json,
+        )
+    if args.command == "translate-renpy":
+        return _translate_renpy(
+            args.sdk,
+            args.project,
+            args.output,
+            workspace=args.workspace,
+            endpoint=args.endpoint,
+            model=args.model,
+            api_key_environment=args.api_key_env,
+            source_language=args.source_language,
+            target_language=args.language,
+            batch_size=args.batch_size,
+            provider_timeout_seconds=args.provider_timeout,
+            sdk_timeout_seconds=args.sdk_timeout,
+            max_attempts=args.max_attempts,
             as_json=args.json,
         )
     raise AssertionError(f"未处理的命令：{args.command}")

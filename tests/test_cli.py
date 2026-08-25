@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -12,7 +13,12 @@ from galtrans.adapters.renpy import (
     RenpyLaunchValidation,
     RenpySdkCrosscheck,
 )
+from galtrans.automated import (
+    AutomatedRenpyTranslationError,
+    AutomatedRenpyTranslationResult,
+)
 from galtrans.cli import main
+from galtrans.qa import TranslationQualityOutcome
 
 
 class CliTests(unittest.TestCase):
@@ -22,7 +28,7 @@ class CliTests(unittest.TestCase):
             exit_code = main(["doctor"])
 
         self.assertEqual(exit_code, 0)
-        self.assertIn("GalTrans: 0.2.0", output.getvalue())
+        self.assertIn("GalTrans: 0.3.0", output.getvalue())
         self.assertIn("Status:   OK", output.getvalue())
 
     def test_scan_json_succeeds(self) -> None:
@@ -143,6 +149,112 @@ class CliTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertIn("显示证据：GalTrans sample | 1280 x 720", output.getvalue())
         self.assertIn("启动显示验证：通过", output.getvalue())
+
+    def test_translate_renpy_uses_environment_key_without_printing_it(self) -> None:
+        result = AutomatedRenpyTranslationResult(
+            task_id="task_" + "a" * 24,
+            segment_count=3,
+            batch_count=2,
+            quality_outcome=TranslationQualityOutcome.LOW_CONFIDENCE,
+            low_confidence_segment_ids=("seg_1",),
+            workspace_root=Path("C:/workspace"),
+            database_path=Path("C:/workspace/translation.sqlite3"),
+            output_root=Path("C:/translated"),
+            translation_files=(Path("C:/translated/game/tl/schinese/script.rpy"),),
+            sdk_version="8.5.3.test",
+        )
+        output = io.StringIO()
+        secret = "cli-secret-key"
+
+        def run_without_secret(
+            *_args: object,
+            **_kwargs: object,
+        ) -> AutomatedRenpyTranslationResult:
+            self.assertNotIn("TEST_GALTRANS_KEY", os.environ)
+            return result
+
+        with (
+            mock.patch.dict("os.environ", {"TEST_GALTRANS_KEY": secret}),
+            mock.patch(
+                "galtrans.cli.run_automated_renpy_translation",
+                side_effect=run_without_secret,
+            ) as run,
+            contextlib.redirect_stdout(output),
+        ):
+            exit_code = main(
+                [
+                    "translate-renpy",
+                    "C:/sdk",
+                    "C:/project",
+                    "C:/translated",
+                    "--endpoint",
+                    "https://example.com/v1/chat/completions",
+                    "--model",
+                    "test-model",
+                    "--api-key-env",
+                    "TEST_GALTRANS_KEY",
+                ]
+            )
+            self.assertEqual(os.environ["TEST_GALTRANS_KEY"], secret)
+
+        self.assertEqual(exit_code, 0)
+        self.assertTrue(run.called)
+        self.assertIn("自动翻译：3 条文本", output.getvalue())
+        self.assertIn("低置信度 1 条", output.getvalue())
+        self.assertNotIn(secret, output.getvalue())
+
+    def test_translate_renpy_requires_api_key_environment(self) -> None:
+        error = io.StringIO()
+        with (
+            mock.patch.dict("os.environ", {}, clear=True),
+            contextlib.redirect_stderr(error),
+        ):
+            exit_code = main(
+                [
+                    "translate-renpy",
+                    "C:/sdk",
+                    "C:/project",
+                    "C:/translated",
+                    "--endpoint",
+                    "https://example.com/v1/chat/completions",
+                    "--model",
+                    "test-model",
+                ]
+            )
+
+        self.assertEqual(exit_code, 2)
+        self.assertIn("GALTRANS_API_KEY", error.getvalue())
+
+    def test_translate_renpy_restores_key_after_safe_failure(self) -> None:
+        secret = "restored-secret-key"
+        error = io.StringIO()
+        with (
+            mock.patch.dict("os.environ", {"TEST_GALTRANS_KEY": secret}),
+            mock.patch(
+                "galtrans.cli.run_automated_renpy_translation",
+                side_effect=AutomatedRenpyTranslationError("safe stop"),
+            ),
+            contextlib.redirect_stderr(error),
+        ):
+            exit_code = main(
+                [
+                    "translate-renpy",
+                    "C:/sdk",
+                    "C:/project",
+                    "C:/translated",
+                    "--endpoint",
+                    "https://example.com/v1/chat/completions",
+                    "--model",
+                    "test-model",
+                    "--api-key-env",
+                    "TEST_GALTRANS_KEY",
+                ]
+            )
+            self.assertEqual(os.environ["TEST_GALTRANS_KEY"], secret)
+
+        self.assertEqual(exit_code, 2)
+        self.assertIn("safe stop", error.getvalue())
+        self.assertNotIn(secret, error.getvalue())
 
 
 
