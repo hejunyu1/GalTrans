@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import shutil
 import tempfile
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
@@ -44,6 +45,31 @@ class AutomatedRenpyTranslationError(RuntimeError):
     """Raised when an automatic source-only Ren'Py run cannot finish safely."""
 
 
+class AutomatedRenpyTranslationStage(StrEnum):
+    """Stable stages exposed to player-facing progress observers."""
+
+    PREFLIGHT = "preflight"
+    EXTRACTING = "extracting"
+    SDK_CROSSCHECK = "sdk_crosscheck"
+    TRANSLATING = "translating"
+    QUALITY_CHECK = "quality_check"
+    RENDERING = "rendering"
+    VALIDATING_EXPORT = "validating_export"
+    PUBLISHING = "publishing"
+    COMPLETED = "completed"
+
+
+@dataclass(frozen=True, slots=True)
+class AutomatedRenpyTranslationProgress:
+    stage: AutomatedRenpyTranslationStage
+    message: str
+    completed_batches: int | None = None
+    total_batches: int | None = None
+
+
+ProgressCallback = Callable[[AutomatedRenpyTranslationProgress], None]
+
+
 @dataclass(frozen=True, slots=True)
 class AutomatedRenpyTranslationResult:
     task_id: str
@@ -70,6 +96,32 @@ class AutomatedRenpyTranslationResult:
             "translation_files": [str(path) for path in self.translation_files],
             "sdk_version": self.sdk_version,
         }
+
+
+def default_automated_workspace(output_path: Path) -> Path:
+    """Return the resumable workspace beside a requested output directory."""
+    expanded_output = output_path.expanduser()
+    return expanded_output.parent / f".{expanded_output.name}.galtrans"
+
+
+def _emit_progress(
+    callback: ProgressCallback | None,
+    stage: AutomatedRenpyTranslationStage,
+    message: str,
+    *,
+    completed_batches: int | None = None,
+    total_batches: int | None = None,
+) -> None:
+    if callback is None:
+        return
+    callback(
+        AutomatedRenpyTranslationProgress(
+            stage=stage,
+            message=message,
+            completed_batches=completed_batches,
+            total_batches=total_batches,
+        )
+    )
 
 
 def _roots_overlap(first: Path, second: Path) -> bool:
@@ -182,11 +234,26 @@ def _complete_translation_task(
     *,
     backend_identity: str,
     max_definitive_attempts: int,
+    progress_callback: ProgressCallback | None,
 ) -> TranslationTaskCheckpoint:
     progress_limit = len(task.batches) * (max_definitive_attempts + 3) + 4
+    last_completed_batches: int | None = None
     for _ in range(progress_limit):
         stored = store.load_task(task.task_id)
         checkpoint = stored.checkpoint
+        completed_batches = sum(
+            batch.status is TranslationBatchStatus.COMPLETED
+            for batch in checkpoint.batches
+        )
+        if completed_batches != last_completed_batches:
+            _emit_progress(
+                progress_callback,
+                AutomatedRenpyTranslationStage.TRANSLATING,
+                f"翻译批次 {completed_batches}/{len(task.batches)}",
+                completed_batches=completed_batches,
+                total_batches=len(task.batches),
+            )
+            last_completed_batches = completed_batches
         if checkpoint.status is TranslationTaskStatus.COMPLETED:
             return checkpoint
         if checkpoint.status is TranslationTaskStatus.PAUSED:
@@ -246,6 +313,7 @@ def _publish_validated_output(
     output_root: Path,
     language: str,
     sdk_timeout_seconds: float,
+    progress_callback: ProgressCallback | None,
 ) -> tuple[tuple[Path, ...], RenpyExportValidation]:
     output_root.parent.mkdir(parents=True, exist_ok=True)
     staging_parent = Path(
@@ -257,6 +325,11 @@ def _publish_validated_output(
             files,
             staged_output,
             input_project_root=project_root,
+        )
+        _emit_progress(
+            progress_callback,
+            AutomatedRenpyTranslationStage.VALIDATING_EXPORT,
+            "用 Ren'Py SDK 验证翻译输出",
         )
         validation = validate_renpy_export(
             sdk_path,
@@ -270,6 +343,11 @@ def _publish_validated_output(
         )
         if output_root.exists() or output_root.is_symlink():
             raise FileExistsError(f"输出目录已存在，拒绝覆盖：{output_root}")
+        _emit_progress(
+            progress_callback,
+            AutomatedRenpyTranslationStage.PUBLISHING,
+            "发布全新输出目录",
+        )
         written.root.rename(output_root)
     finally:
         if staging_parent.exists():
@@ -293,6 +371,7 @@ def run_automated_renpy_translation(
     batch_size: int = 8,
     max_definitive_attempts: int = 2,
     sdk_timeout_seconds: float = 60.0,
+    progress_callback: ProgressCallback | None = None,
 ) -> AutomatedRenpyTranslationResult:
     """Translate, quality-check, render, validate, and publish one new Ren'Py output."""
     if (
@@ -303,10 +382,20 @@ def run_automated_renpy_translation(
         raise AutomatedRenpyTranslationError(
             "Provider 确定失败尝试次数必须是 1 到 5"
         )
+    _emit_progress(
+        progress_callback,
+        AutomatedRenpyTranslationStage.PREFLIGHT,
+        "检查输入、工作区和输出路径",
+    )
     project_root, workspace_root, output_root = _checked_paths(
         project_path,
         workspace_path,
         output_path,
+    )
+    _emit_progress(
+        progress_callback,
+        AutomatedRenpyTranslationStage.EXTRACTING,
+        "提取 Ren'Py 文本",
     )
     extraction_results = extract_renpy_path(project_root)
     segments = tuple(
@@ -315,6 +404,11 @@ def run_automated_renpy_translation(
     if not segments:
         raise AutomatedRenpyTranslationError("Ren'Py 项目没有可翻译文本段")
 
+    _emit_progress(
+        progress_callback,
+        AutomatedRenpyTranslationStage.SDK_CROSSCHECK,
+        "用 Ren'Py SDK 检查源项目",
+    )
     crosscheck = crosscheck_renpy_sdk(
         sdk_path,
         project_root,
@@ -355,11 +449,17 @@ def run_automated_renpy_translation(
             task,
             backend_identity=backend_identity,
             max_definitive_attempts=max_definitive_attempts,
+            progress_callback=progress_callback,
         )
         proposals = store.load_accepted_proposals(task.task_id)
         validated = tuple(
             proposal_validator(task, proposal)
             for proposal in proposals
+        )
+        _emit_progress(
+            progress_callback,
+            AutomatedRenpyTranslationStage.QUALITY_CHECK,
+            "执行确定性译文质量检查",
         )
         report = assess_translation_quality(task, validated)
         store.store_quality_report(
@@ -368,6 +468,11 @@ def run_automated_renpy_translation(
             proposal_validator,
         )
 
+    _emit_progress(
+        progress_callback,
+        AutomatedRenpyTranslationStage.RENDERING,
+        "生成 Ren'Py 翻译文件",
+    )
     rendered_files = prepare_renpy_translation_files(
         segments,
         task,
@@ -382,6 +487,7 @@ def run_automated_renpy_translation(
         output_root=output_root,
         language=target_language,
         sdk_timeout_seconds=sdk_timeout_seconds,
+        progress_callback=progress_callback,
     )
     low_confidence_segment_ids = tuple(
         result.segment_id for result in report.low_confidence_results
@@ -391,7 +497,7 @@ def run_automated_renpy_translation(
         if low_confidence_segment_ids
         else TranslationQualityOutcome.CLEAR
     )
-    return AutomatedRenpyTranslationResult(
+    result = AutomatedRenpyTranslationResult(
         task_id=task.task_id,
         segment_count=task.segment_count,
         batch_count=len(task.batches),
@@ -403,3 +509,9 @@ def run_automated_renpy_translation(
         translation_files=translation_files,
         sdk_version=validation.version,
     )
+    _emit_progress(
+        progress_callback,
+        AutomatedRenpyTranslationStage.COMPLETED,
+        "自动翻译完成",
+    )
+    return result

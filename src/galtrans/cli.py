@@ -23,6 +23,7 @@ from galtrans.adapters.renpy import (
 from galtrans.automated import (
     AutomatedRenpyTranslationError,
     AutomatedRenpyTranslationResult,
+    default_automated_workspace,
     run_automated_renpy_translation,
 )
 from galtrans.pipeline import TranslationExecutionError
@@ -353,8 +354,7 @@ def _validate_renpy_launch(
 def _automatic_workspace(output: Path, workspace: Path | None) -> Path:
     if workspace is not None:
         return workspace
-    expanded_output = output.expanduser()
-    return expanded_output.parent / f".{expanded_output.name}.galtrans"
+    return default_automated_workspace(output)
 
 
 def _translate_renpy(

@@ -8,6 +8,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from galtrans import __version__
 from galtrans.adapters.renpy import (
     RenpyExportValidation,
     RenpyLaunchValidation,
@@ -28,7 +29,7 @@ class CliTests(unittest.TestCase):
             exit_code = main(["doctor"])
 
         self.assertEqual(exit_code, 0)
-        self.assertIn("GalTrans: 0.3.0", output.getvalue())
+        self.assertIn(f"GalTrans: {__version__}", output.getvalue())
         self.assertIn("Status:   OK", output.getvalue())
 
     def test_scan_json_succeeds(self) -> None:

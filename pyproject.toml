@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "galtrans"
-version = "0.3.0"
+version = "0.3.1"
 description = "A safe, context-aware localization workflow for visual novels."
 readme = "README.md"
 requires-python = ">=3.13,<3.15"
@@ -12,6 +12,7 @@ dependencies = []
 
 [project.scripts]
 galtrans = "galtrans.cli:main"
+galtrans-gui = "galtrans.gui:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

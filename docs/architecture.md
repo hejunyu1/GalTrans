@@ -133,6 +133,15 @@
     因此不能解释为语义或文学质量保证。
   - 翻译文件先写入最终输出同一父目录的临时树；只有完整临时 SDK 中的 lint 与独立 compile 通过
     后才原子重命名为最终新目录。失败会清理临时输出，但保留可恢复任务状态。
+- 最小 Windows 玩家界面：
+  - `galtrans.gui` 使用标准库 Tkinter 收集 SDK、source-only 项目、全新输出和 OpenAI 兼容
+    Provider 配置，直接调用现有自动应用服务，不自行读写游戏文件或接受模型结果。
+  - 自动服务通过类型化阶段进度回调报告路径检查、提取、SDK 交叉检查、批次翻译、质量检查、
+    渲染、验证、发布和完成；界面只把事件放入线程安全队列，再由 Tk 主线程更新控件。
+  - Provider 调用和 SDK 验证在单个后台线程中串行执行，窗口线程不等待或 `join`；成功和失败
+    都恢复配置控件。当前不提供强制取消，避免在无法证明 Provider 结果状态时盲目重提。
+  - GUI API key 不进入环境变量、命令行、SQLite、进度或错误日志；开始后清空输入控件，后台
+    Worker 完成后释放请求引用，并在意外错误文本中替换凭据值。
 
 ## 当前限制与下一阶段
 
@@ -145,9 +154,10 @@
 
 结构化翻译任务、检查点和已接受提案现在可以在输入项目之外原子保存并重开恢复。首个真实网络
 适配器和 `translate-renpy` 已把这些状态连接到 source-only Ren'Py 的自动翻译、质量报告、临时
-写出和 SDK 验证流程。不过兼容协议只由本机受控 HTTP 服务完整测试，尚未证明任何具体商业服务
-的真实兼容性、幂等期限、查询保证或计费语义。当前仍没有翻译记忆、审计事件、费用核算、通用
-Provider 管理、完整玩家工作区或 GUI。同步 Chat Completions 无法查询不确定请求时会安全停止。
+写出和 SDK 验证流程；最小 Tkinter 界面现在复用同一路径并显示内存进度。不过兼容协议只由本机
+受控 HTTP 服务完整测试，尚未证明任何具体商业服务的真实兼容性、幂等期限、查询保证或计费语义。
+当前仍没有翻译记忆、审计事件、费用核算、通用 Provider 管理、完整玩家工作区或 Windows 安装包。
+同步 Chat Completions 无法查询不确定请求时会安全停止。
 
 自动流程会把 `low_confidence` 作为警告继续生成独立输出，以满足无人逐条审阅的早期产品方向；
 这不代表译文正确、自然或高置信度。当前仍只有“译文与原文未变化”这一条保守规则，没有语义
@@ -155,9 +165,9 @@ Provider 管理、完整玩家工作区或 GUI。同步 Chat Completions 无法�
 不检查像素、实际显示译文、字体、文本溢出或交互路线。
 
 当前输入仍必须是带 `.rpy/.rpym` 源脚本的 Ren'Py 项目，不支持普通玩家通常拿到的所有成品
-游戏，也没有玩家 GUI、Windows 安装包或一键自动启动的完整副本体验。当前自动模型翻译仍需
-用户通过命令配置 SDK、endpoint、模型和 API key。后续里程碑必须逐步缩小这一差距，并对无法
-处理的封装、加密或魔改格式返回明确的不支持结果。
+游戏，也没有 Windows 安装包或一键自动启动的完整副本体验。最小 GUI 仍要求用户提供 SDK、
+endpoint、模型和 API key。后续里程碑必须逐步缩小这一差距，并对无法处理的封装、加密或魔改
+格式返回明确的不支持结果。
 
 ## 计划模块
 
@@ -222,7 +232,8 @@ OpenAI 兼容同步 HTTP 适配器；没有 Agent 子进程或外部会话，兼
 [ADR 0013](decisions/0013-prepare-completed-renpy-proposals.md)，首个确定性质量检查与低置信度报告见
 [ADR 0014](decisions/0014-deterministic-translation-quality-boundary.md)，质量报告持久化见
 [ADR 0015](decisions/0015-persist-translation-quality-reports.md)，首个自动纵向流程见
-[ADR 0016](decisions/0016-automatic-renpy-provider-workflow.md)。
+[ADR 0016](decisions/0016-automatic-renpy-provider-workflow.md)，最小玩家界面与进度边界见
+[ADR 0017](decisions/0017-minimal-windows-player-interface.md)。
 
 ## 稳定 ID
 

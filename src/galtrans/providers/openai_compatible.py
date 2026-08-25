@@ -325,7 +325,7 @@ class OpenAICompatibleChatBackend:
                 "Authorization": f"Bearer {self._api_key}",
                 "Content-Type": "application/json; charset=utf-8",
                 "Idempotency-Key": idempotency_key,
-                "User-Agent": "GalTrans/0.3",
+                "User-Agent": "GalTrans/0.3.1",
             },
             method="POST",
         )

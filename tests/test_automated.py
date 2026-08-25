@@ -15,6 +15,8 @@ from galtrans.adapters.renpy import (
 from galtrans.adapters.renpy.extractor import find_renpy_string_literals
 from galtrans.automated import (
     AutomatedRenpyTranslationError,
+    AutomatedRenpyTranslationProgress,
+    AutomatedRenpyTranslationStage,
     run_automated_renpy_translation,
 )
 from galtrans.ir import SegmentKind, TextSegment
@@ -226,6 +228,7 @@ label start:
             source = project / "game" / "script.rpy"
             before_hash = hashlib.sha256(source.read_bytes()).hexdigest()
             backend = _AutomaticBackend()
+            progress: list[AutomatedRenpyTranslationProgress] = []
 
             def validate(
                 sdk_path: Path,
@@ -259,6 +262,7 @@ label start:
                     backend,
                     backend_identity="automatic-test-v1",
                     batch_size=2,
+                    progress_callback=progress.append,
                 )
 
             self.assertEqual(result.segment_count, 3)
@@ -271,6 +275,30 @@ label start:
             contents = result.translation_files[0].read_text(encoding="utf-8-sig")
             self.assertIn("译文0-0[name]", contents)
             self.assertIn("translate schinese strings:", contents)
+            self.assertEqual(
+                [item.stage for item in progress],
+                [
+                    AutomatedRenpyTranslationStage.PREFLIGHT,
+                    AutomatedRenpyTranslationStage.EXTRACTING,
+                    AutomatedRenpyTranslationStage.SDK_CROSSCHECK,
+                    AutomatedRenpyTranslationStage.TRANSLATING,
+                    AutomatedRenpyTranslationStage.TRANSLATING,
+                    AutomatedRenpyTranslationStage.TRANSLATING,
+                    AutomatedRenpyTranslationStage.QUALITY_CHECK,
+                    AutomatedRenpyTranslationStage.RENDERING,
+                    AutomatedRenpyTranslationStage.VALIDATING_EXPORT,
+                    AutomatedRenpyTranslationStage.PUBLISHING,
+                    AutomatedRenpyTranslationStage.COMPLETED,
+                ],
+            )
+            self.assertEqual(
+                [
+                    (item.completed_batches, item.total_batches)
+                    for item in progress
+                    if item.stage is AutomatedRenpyTranslationStage.TRANSLATING
+                ],
+                [(0, 2), (1, 2), (2, 2)],
+            )
 
     def test_low_confidence_is_reported_but_does_not_require_human_review(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
