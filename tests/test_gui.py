@@ -63,11 +63,11 @@ class PlayerGuiTests(unittest.TestCase):
         with (
             mock.patch.dict(os.environ, {}, clear=True),
             mock.patch(
-                "galtrans.gui.OpenAICompatibleChatBackend",
+                "galtrans.player.OpenAICompatibleChatBackend",
                 side_effect=backend_factory,
             ),
             mock.patch(
-                "galtrans.gui.run_automated_renpy_translation",
+                "galtrans.player.run_automated_renpy_translation",
                 return_value=mock.sentinel.result,
             ) as automated,
         ):

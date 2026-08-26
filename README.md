@@ -4,10 +4,10 @@ GalTrans 的长期目标是让普通玩家把自己合法持有、且被工具�
 制作成可以像已有汉化游戏一样启动和游玩的独立个人汉化副本。原游戏目录保持只读，语言模型
 只能提交结构化翻译建议，确定性程序负责游戏文件处理、校验和导出。
 
-V0.3.1 已把第一个真实 OpenAI 兼容 Provider、可恢复翻译状态、确定性质量检查、Ren'Py 渲染和
-隔离验证连接成自动流程，并增加最小 Windows 玩家界面。它仍只支持带源脚本的 Ren'Py 项目，
-尚未提供普通成品游戏导入或 Windows 安装包。遇到加密、受保护或无法可靠识别的格式时，
-GalTrans 会明确提示不支持，而不是破解或猜测处理。
+V0.4.0 已把第一个真实 OpenAI 兼容 Provider、可恢复翻译状态、确定性质量检查、Ren'Py 渲染和
+隔离验证连接成自动流程，并增加 TypeScript、React 和 Tauri 2 构建的现代 Windows 玩家工作台。
+它仍只支持带源脚本的 Ren'Py 项目，尚未提供普通成品游戏导入或 Windows 安装包。遇到加密、
+受保护或无法可靠识别的格式时，GalTrans 会明确提示不支持，而不是破解或猜测处理。
 
 V0.2 已支持只读扫描、Ren'Py 文本提取，以及在临时副本上调用官方 SDK 完成导出和基础显示验证：
 
@@ -55,20 +55,31 @@ Provider 调用前完成 SDK 交叉检查，译文必须同时通过标记验证
 .\scripts\galtrans.ps1 scan .\samples\renpy_demo
 ```
 
-普通玩家入口是最小 Windows 图形界面：
+现代 Windows 工作台目前从仓库开发环境启动：
+
+```powershell
+Set-Location .\desktop
+npm ci
+$env:Path = "$env:USERPROFILE\.cargo\bin;$env:Path"
+npm run tauri dev
+```
+
+窗口中选择 Ren'Py SDK、带 `game` 目录的源项目和一个尚不存在的输出路径，再填写翻译服务
+（Provider）的 Chat Completions URL、模型名和 API key，点击“开始自动汉化”。窗口会显示路径
+检查、提取、SDK 交叉检查、批次翻译、质量检查、渲染、导出验证和发布进度；成功或失败后输入
+控件都会恢复。TypeScript 界面只通过关闭式 JSON/JSONL 桥调用现有 Python 自动服务，不复制
+游戏处理逻辑。API key 通过标准输入交给固定 Python 子进程，不进入命令行、环境变量、工作区、
+日志或 SDK 参数；开始后输入框立即清空。
+
+首次开发启动需要 Node.js、Rust 和项目内 npm 依赖。当前界面仍依赖仓库内的 Python 环境和单独
+安装的 Ren'Py SDK，不是安装包；它不会自动下载 SDK、启动游戏或把补丁拼成完整游戏副本。
+原有 Tkinter 界面暂时保留为轻量回退入口：
 
 ```powershell
 .\scripts\galtrans-gui.ps1
 ```
 
-窗口中选择 Ren'Py SDK、带 `game` 目录的源项目和一个尚不存在的输出路径，再填写翻译服务
-（Provider）的 Chat Completions URL、模型名和 API key，点击“开始自动汉化”。翻译在后台线程
-运行，窗口会显示路径检查、提取、SDK 交叉检查、批次翻译、质量检查、渲染、导出验证和发布
-进度；成功或失败后输入控件都会恢复。API key 不写入环境变量、工作区、日志或 SDK 参数，
-开始后输入框立即清空，只在后台 Provider 对象和 HTTPS 请求头的内存中保留到本次运行结束。
-
-当前界面仍依赖仓库内的 Python 环境和单独安装的 Ren'Py SDK，不是安装包。它不会自动下载 SDK、
-启动游戏或把补丁拼成完整游戏副本。可以用下面的命令只检查图形环境而不打开窗口：
+可以用下面的命令只检查 Tkinter 图形环境而不打开窗口：
 
 ```powershell
 .\scripts\galtrans-gui.ps1 --check
@@ -184,10 +195,10 @@ Ren'Py 保守提取器已经可以把 `.rpy` 中的常见角色台词、旁白�
 处理任务，并把通过确定性验证的译文发布到全新输出目录；网络协议由本机 HTTP 服务完整测试，
 尚未用用户的真实商业 Provider、凭据或费用进行实机验证，也不承诺所有标称“OpenAI 兼容”的
 服务行为完全一致。当前没有费用统计、翻译记忆、审计、角色卡、术语表、自动语义审校、安装包
-或自动启动。最小 GUI 只连接现有 source-only 自动流程，尚未隐藏 Python、自动发现 SDK 或支持
-普通成品游戏。首条质量检查只覆盖“译文与原文未变化”；低置信度不会阻塞自动输出，因此本版本
-强调安全生成与可恢复性，不保证无人审阅译文的文学质量或语义正确性。SQLite v1 至 v3 继续
-明确拒绝，不进行自动迁移。
+或自动启动。现代 Tauri 工作台和 Tkinter 回退界面都只连接现有 source-only 自动流程；当前开发
+版本尚未把 Python 打包为 sidecar、自动发现 SDK 或支持普通成品游戏。首条质量检查只覆盖“译文
+与原文未变化”；低置信度不会阻塞自动输出，因此本版本强调安全生成与可恢复性，不保证无人
+审阅译文的文学质量或语义正确性。SQLite v1 至 v3 继续明确拒绝，不进行自动迁移。
 
 具体进度见 [`docs/roadmap.md`](docs/roadmap.md)。
 
