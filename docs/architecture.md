@@ -246,6 +246,20 @@ OpenAI 兼容同步 HTTP 适配器；没有 Agent 子进程或外部会话，兼
 [ADR 0017](decisions/0017-minimal-windows-player-interface.md)，现代 Tauri 工作台与进程桥见
 [ADR 0018](decisions/0018-typescript-tauri-player-workbench.md)。
 
+## Ren'Py 兼容性识别边界
+
+`adapters.renpy.compatibility` 只检查玩家选择的目录结构和文件元数据。它接受标准安装根目录或其
+`game` 目录，在固定深度和项目数上限内、不跟随符号链接或目录联接地扫描 `game`。RPA 归档和
+RPYc 编译脚本只按路径与扩展名记录，绝不打开或解释内容；唯一可选内容读取是有 256 KiB 上限的
+`renpy/__init__.py`，且只接受明确的 `version_tuple` 作为版本线索。
+
+关闭式 v1 报告只产生四种状态：`source_ready` 表示完整扫描发现当前流程可读的松散源脚本；
+`packaged_requires_import` 表示编译脚本或由启动器/运行时佐证的归档构成标准成品证据，但当前不
+能继续；`uncertain` 表示证据不足、扫描不完整或跨边界链接；`not_renpy` 表示没有足够证据。
+报告还分开列出已有 `game/tl` 文件，避免把现有译文误当成原始源脚本。该接口目前不接 CLI、GUI、
+Provider、工作区、导出或启动流程；决策见
+[ADR 0019](decisions/0019-read-only-renpy-compatibility-report.md)。
+
 ## 稳定 ID
 
 文本段 ID 不依赖绝对路径，避免项目换电脑后全部变化。初版使用以下信息计算摘要：

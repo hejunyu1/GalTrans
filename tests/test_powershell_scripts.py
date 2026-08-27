@@ -58,7 +58,7 @@ class WindowsPowerShellCompatibilityTests(unittest.TestCase):
         )
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("GalTrans GUI 0.4.0", result.stdout)
+        self.assertIn("GalTrans GUI 0.4.1", result.stdout)
         self.assertIn("OK", result.stdout)
 
 

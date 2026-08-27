@@ -1,5 +1,14 @@
 """Conservative Ren'Py extraction, validation, and export interfaces."""
 
+from galtrans.adapters.renpy.compatibility import (
+    RENPY_COMPATIBILITY_REPORT_SCHEMA_VERSION,
+    RenpyCompatibilityIssue,
+    RenpyCompatibilityIssueCode,
+    RenpyCompatibilityReport,
+    RenpyCompatibilityStatus,
+    RenpyVersionHint,
+    inspect_renpy_compatibility,
+)
 from galtrans.adapters.renpy.exporter import (
     RenderedRenpyFile,
     RenpyExportError,
@@ -36,10 +45,15 @@ from galtrans.adapters.renpy.template import (
 )
 
 __all__ = [
+    "RENPY_COMPATIBILITY_REPORT_SCHEMA_VERSION",
     "OfficialTemplate",
     "OfficialTemplateEntry",
     "RenderedRenpyFile",
     "RenderedRenpyFragment",
+    "RenpyCompatibilityIssue",
+    "RenpyCompatibilityIssueCode",
+    "RenpyCompatibilityReport",
+    "RenpyCompatibilityStatus",
     "RenpyExportError",
     "RenpyExportValidation",
     "RenpyLaunchValidation",
@@ -49,11 +63,13 @@ __all__ = [
     "RenpySdkError",
     "RenpyTemplateError",
     "RenpyTemplateMapping",
+    "RenpyVersionHint",
     "WrittenRenpyTranslationDirectory",
     "assemble_official_translation_files",
     "crosscheck_renpy_sdk",
     "extract_renpy_file",
     "extract_renpy_path",
+    "inspect_renpy_compatibility",
     "prepare_renpy_translation_files",
     "read_official_translation_templates",
     "render_official_translation_fragment",
