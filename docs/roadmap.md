@@ -213,9 +213,9 @@ OpenAI 兼容服务。它不是 Windows 安装包，不支持普通 `.rpa/.rpyc`
 - [x] API key 只通过子进程标准输入传递，不进入命令行、环境变量、SQLite 或日志
 - [x] 保留 Tkinter 作为回退入口，并用真实 Windows 窗口验证布局、表单错误和文件夹选择器
 
-现代工作台已经能从仓库开发环境启动并调用相同的 source-only 自动流程。当前版本仍依赖仓库
-`.venv`，尚未把 Python 运行时和应用服务打包为 Tauri sidecar，也没有正式安装器、自动更新或
-签名；因此它是可试用的开发版，还不是可以独立分发给普通玩家的成品。
+这个小里程碑完成时，现代工作台已经能从仓库开发环境启动并调用相同的 source-only 自动流程，
+但仍依赖仓库 `.venv`。后面的固定 sidecar 小里程碑已消除这项运行时依赖；正式安装器、自动更新
+和签名仍未实现，因此当前仍是可试用开发版，而不是可直接安装的普通玩家成品。
 
 #### 已完成的小里程碑：只读 Ren'Py 成品识别与兼容性报告
 
@@ -231,11 +231,24 @@ source-only 流程可以继续；`packaged_requires_import` 只代表有足够�
 已经能提取或汉化其中内容。GalTrans 不读取 RPA 内容、不反编译 RPYc、不运行游戏，也不把扩展名
 当成解密或授权证据。
 
+#### 已完成的小里程碑：固定 Python 后端 Tauri sidecar
+
+- [x] 用固定版本 PyInstaller 将桌面桥、GalTrans 模块、CPython 和所需标准库打包为单文件 Windows 后端
+- [x] 按当前 Rust 目标三元组生成 Tauri `externalBin` 输入，并在复制前运行关闭式 JSONL 冒烟测试
+- [x] Rust 只启动应用资源目录中的固定 `galtrans-backend.exe`，不再查找仓库、`.venv` 或源码
+- [x] sidecar 不接收命令行参数，API key 仍只通过标准输入传递，并移除 Python/API key 环境变量
+- [x] 保持前端只有目录选择和 `start_translation`；不增加通用 Shell、文件系统或 Provider 权限
+- [x] 生成无安装器的 Tauri release 目录，忽略 sidecar 与构建产物，并在 Windows CI 重建验证
+
+这个增量只消除了工作台运行时对仓库 Python 环境的依赖；从源码构建仍需要 Python 3.13、固定
+PyInstaller、Node.js 和 Rust，实际翻译仍需要用户提供 Ren'Py SDK、endpoint、模型和 API key。
+单文件 sidecar 启动时会把内部运行资源展开到系统临时目录，可能增加首次启动时间并触发未签名
+程序的安全软件提示。当前没有安装器、签名、自动更新、SDK 下载或真实商业 Provider 实机验证。
+
 #### 下一批玩家 MVP 工作
 
 - 把兼容性报告接入桌面工作台，并让成品待导入状态给出清楚的下一步说明
 - 为明确支持的非加密标准 Ren'Py 成品结构设计可审计导入边界和授权测试矩阵
-- 把固定 Python 后端和所需资源打包为 sidecar，生成无需仓库命令的可试用 Windows 构建
 - 把 SDK lint/compile 后的基础启动验证接入一键流程，并清楚区分“补丁输出”和“游戏副本”
 - 增加独立工作区状态和可理解的恢复建议
 - 显示未译、低置信度、重试、费用和验证结果，不强制逐条人工审阅

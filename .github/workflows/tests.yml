@@ -20,13 +20,41 @@ jobs:
         with:
           python-version: "3.13"
 
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+
       - name: Create project virtual environment
         run: python -m venv .venv
+
+      - name: Install pinned desktop build dependency
+        run: .\.venv\Scripts\python.exe -m pip install -r requirements-build.txt
+
+      - name: Install desktop dependencies
+        working-directory: desktop
+        run: npm ci
+
+      - name: Build and smoke-test packaged Python sidecar
+        run: .\scripts\build-desktop-sidecar.ps1
 
       - name: Run unit tests
         run: |
           $env:PYTHONPATH = Join-Path $PWD "src"
           python -m unittest discover -s tests -t . -v
+
+      - name: Run desktop frontend tests
+        working-directory: desktop
+        run: npm test
+
+      - name: Run Tauri bridge tests
+        run: cargo test --manifest-path desktop\src-tauri\Cargo.toml
+
+      - name: Build unpackaged Tauri workbench
+        working-directory: desktop
+        run: npm run tauri build
 
       - name: Compile Python sources
         run: python -m compileall -q src tests

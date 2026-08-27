@@ -1,11 +1,12 @@
 {
   "name": "galtrans-desktop",
   "private": true,
-  "version": "0.4.1",
+  "version": "0.4.2",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
+    "build:sidecar": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File ../scripts/build-desktop-sidecar.ps1",
     "test": "vitest run",
     "tauri": "tauri"
   },

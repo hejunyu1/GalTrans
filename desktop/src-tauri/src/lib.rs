@@ -7,9 +7,15 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use tauri::{AppHandle, Emitter, Manager};
 
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+
 const BRIDGE_SCHEMA_VERSION: u32 = 1;
 const MAX_BRIDGE_LINE_BYTES: u64 = 256 * 1024;
 const MAX_STDERR_BYTES: u64 = 16 * 1024;
+const BACKEND_BINARY_NAME: &str = "galtrans-backend.exe";
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
 const ALLOWED_STAGES: [&str; 9] = [
     "preflight",
     "extracting",
@@ -188,12 +194,20 @@ fn validate_event(event: &BridgeEvent) -> Result<(), String> {
     Ok(())
 }
 
-fn repository_root() -> Result<PathBuf, String> {
-    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let candidate = manifest.join("..").join("..");
-    candidate
-        .canonicalize()
-        .map_err(|error| format!("无法定位 GalTrans 开发目录：{error}"))
+fn backend_executable_path(resource_directory: &Path) -> PathBuf {
+    resource_directory.join(BACKEND_BINARY_NAME)
+}
+
+fn backend_command(executable: &Path, resource_directory: &Path) -> Command {
+    let mut command = Command::new(executable);
+    command
+        .current_dir(resource_directory)
+        .env_remove("GALTRANS_API_KEY")
+        .env_remove("PYTHONHOME")
+        .env_remove("PYTHONPATH");
+    #[cfg(windows)]
+    command.creation_flags(CREATE_NO_WINDOW);
+    command
 }
 
 fn read_limited_stderr<R: Read>(reader: R) -> String {
@@ -215,10 +229,16 @@ fn redact_secret(message: &str, secret: &str) -> String {
 }
 
 fn run_python_bridge(app: AppHandle, request: FrontendTranslationRequest) -> Result<(), String> {
-    let repository = repository_root()?;
-    let python = repository.join(".venv").join("Scripts").join("python.exe");
-    if !python.is_file() {
-        return Err(format!("开发版找不到 Python 环境：{}", python.display()));
+    let resource_directory = app
+        .path()
+        .resource_dir()
+        .map_err(|error| format!("无法定位 GalTrans 应用资源目录：{error}"))?;
+    let backend = backend_executable_path(&resource_directory);
+    if !backend.is_file() {
+        return Err(format!(
+            "找不到 GalTrans 后端 sidecar：{}",
+            backend.display()
+        ));
     }
 
     let bridge_request = BridgeRequest {
@@ -233,12 +253,7 @@ fn run_python_bridge(app: AppHandle, request: FrontendTranslationRequest) -> Res
     let request_json =
         serde_json::to_vec(&bridge_request).map_err(|_| "无法编码桌面翻译请求".to_string())?;
 
-    let mut child = Command::new(&python)
-        .arg("-m")
-        .arg("galtrans.desktop_bridge")
-        .current_dir(&repository)
-        .env("PYTHONPATH", repository.join("src"))
-        .env_remove("GALTRANS_API_KEY")
+    let mut child = backend_command(&backend, &resource_directory)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -454,5 +469,25 @@ mod tests {
     fn error_redaction_removes_api_key() {
         let redacted = redact_secret("provider rejected test-secret", "test-secret");
         assert_eq!(redacted, "provider rejected [凭据已隐藏]");
+    }
+
+    #[test]
+    fn backend_command_uses_only_the_packaged_sidecar() {
+        let resource_directory = Path::new(r"C:\Program Files\GalTrans");
+        let executable = backend_executable_path(resource_directory);
+        let command = backend_command(&executable, resource_directory);
+
+        assert_eq!(executable, resource_directory.join("galtrans-backend.exe"));
+        assert_eq!(command.get_program(), executable.as_os_str());
+        assert_eq!(command.get_args().count(), 0);
+        assert_eq!(command.get_current_dir(), Some(resource_directory));
+
+        let removed_environment: Vec<_> = command
+            .get_envs()
+            .filter_map(|(name, value)| value.is_none().then_some(name))
+            .collect();
+        assert!(removed_environment.contains(&std::ffi::OsStr::new("GALTRANS_API_KEY")));
+        assert!(removed_environment.contains(&std::ffi::OsStr::new("PYTHONHOME")));
+        assert!(removed_environment.contains(&std::ffi::OsStr::new("PYTHONPATH")));
     }
 }

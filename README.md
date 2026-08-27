@@ -4,11 +4,12 @@ GalTrans 的长期目标是让普通玩家把自己合法持有、且被工具�
 制作成可以像已有汉化游戏一样启动和游玩的独立个人汉化副本。原游戏目录保持只读，语言模型
 只能提交结构化翻译建议，确定性程序负责游戏文件处理、校验和导出。
 
-V0.4.1 已把第一个真实 OpenAI 兼容 Provider、可恢复翻译状态、确定性质量检查、Ren'Py 渲染和
+V0.4.2 已把第一个真实 OpenAI 兼容 Provider、可恢复翻译状态、确定性质量检查、Ren'Py 渲染和
 隔离验证连接成自动流程，并增加 TypeScript、React 和 Tauri 2 构建的现代 Windows 玩家工作台。
 这一版还新增只读 Ren'Py 兼容性检查：可以区分当前可处理的源码项目、已识别但尚不能导入的
 `.rpa/.rpyc` 成品结构、证据不足的目录和非 Ren'Py 目录。它不会打开归档或反编译脚本；成品游戏
-导入与 Windows 安装包仍未实现。
+导入与 Windows 安装包仍未实现。固定 Python 后端现已和 CPython 运行时、标准库及所需模块一起
+冻结为 Tauri Windows sidecar；工作台运行时不再查找仓库 `.venv`、源码目录或 `PYTHONPATH`。
 
 V0.2 已支持只读扫描、Ren'Py 文本提取，以及在临时副本上调用官方 SDK 完成导出和基础显示验证：
 
@@ -56,7 +57,13 @@ Provider 调用前完成 SDK 交叉检查，译文必须同时通过标记验证
 .\scripts\galtrans.ps1 scan .\samples\renpy_demo
 ```
 
-现代 Windows 工作台目前从仓库开发环境启动：
+现代 Windows 工作台的构建仍在仓库开发环境中进行。首次构建需安装固定的 PyInstaller 构建依赖：
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r .\requirements-build.txt
+```
+
+然后启动开发窗口：
 
 ```powershell
 Set-Location .\desktop
@@ -72,8 +79,19 @@ npm run tauri dev
 游戏处理逻辑。API key 通过标准输入交给固定 Python 子进程，不进入命令行、环境变量、工作区、
 日志或 SDK 参数；开始后输入框立即清空。
 
-首次开发启动需要 Node.js、Rust 和项目内 npm 依赖。当前界面仍依赖仓库内的 Python 环境和单独
-安装的 Ren'Py SDK，不是安装包；它不会自动下载 SDK、启动游戏或把补丁拼成完整游戏副本。
+`npm run tauri dev` 会先重建并冒烟验证当前 Windows 主机目标的 sidecar。构建完成后，实际工作台
+只启动 Tauri 应用资源目录中的 `galtrans-backend.exe`，不调用 `.venv\Scripts\python.exe`。可以生成
+不带安装器的 release 可执行文件和同目录 sidecar：
+
+```powershell
+Set-Location .\desktop
+npm run tauri build
+```
+
+生成的 `src-tauri\target\release\galtrans-desktop.exe` 与 `galtrans-backend.exe` 必须保持在同一目录。
+首次构建仍需要 Python 3.13、固定 PyInstaller、Node.js、Rust 和项目内 npm 依赖；实际翻译仍要求
+用户单独提供 Ren'Py SDK。当前不是安装包，也不会自动下载 SDK、签名、更新、启动游戏或把补丁
+拼成完整游戏副本。
 原有 Tkinter 界面暂时保留为轻量回退入口：
 
 ```powershell
@@ -202,8 +220,9 @@ Ren'Py 保守提取器已经可以把 `.rpy` 中的常见角色台词、旁白�
 处理任务，并把通过确定性验证的译文发布到全新输出目录；网络协议由本机 HTTP 服务完整测试，
 尚未用用户的真实商业 Provider、凭据或费用进行实机验证，也不承诺所有标称“OpenAI 兼容”的
 服务行为完全一致。当前没有费用统计、翻译记忆、审计、角色卡、术语表、自动语义审校、安装包
-或自动启动。现代 Tauri 工作台和 Tkinter 回退界面都只连接现有 source-only 自动流程；当前开发
-版本尚未把 Python 打包为 sidecar、自动发现 SDK 或支持普通成品游戏。首条质量检查只覆盖“译文
+或自动启动。现代 Tauri 工作台和 Tkinter 回退界面都只连接现有 source-only 自动流程；Tauri
+工作台已使用包含 CPython 与所需模块的固定 Windows sidecar，不再依赖仓库 `.venv` 运行，但尚未
+提供安装器、自动发现 SDK 或支持普通成品游戏。首条质量检查只覆盖“译文
 与原文未变化”；低置信度不会阻塞自动输出，因此本版本强调安全生成与可恢复性，不保证无人
 审阅译文的文学质量或语义正确性。SQLite v1 至 v3 继续明确拒绝，不进行自动迁移。
 

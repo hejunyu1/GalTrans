@@ -146,11 +146,15 @@
     Worker 完成后释放请求引用，并在意外错误文本中替换凭据值。
   - `desktop/` 使用 React、TypeScript 和 Tauri 2 提供现代 Windows 工作台。前端只拥有原生
     文件夹选择和一个 `start_translation` 命令，不拥有通用文件系统、Shell 或 Provider 网络能力。
-  - Tauri Rust 后端固定启动仓库 `.venv` 中的 `galtrans.desktop_bridge`。请求通过有大小上限的
+  - 固定 PyInstaller 构建步骤把 `galtrans.desktop_bridge`、GalTrans 模块、CPython 运行时和所需
+    标准库冻结为单文件 Windows sidecar，并按 Tauri 目标三元组命名输入文件；生成物不进入 Git。
+  - Tauri `externalBin` 把 sidecar 复制到应用资源目录，Rust 后端只从该固定目录启动
+    `galtrans-backend.exe`，不查找仓库、`.venv`、源码或 `PYTHONPATH`。请求通过有大小上限的
     JSON 标准输入传递，进度和终态通过关闭式 v1 JSONL 标准输出返回；Rust 再次校验 schema、
     阶段、计数、质量结果和终态，并拒绝并发任务或异常输出。
   - 现代界面的 API key 开始后立即从 React 状态清空，只通过 Python 子进程标准输入传递；Rust
-    显式移除 `GALTRANS_API_KEY`，固定子进程模块和工作目录，并在异常文本中隐藏实际凭据。
+    显式移除 `GALTRANS_API_KEY`、`PYTHONHOME` 和 `PYTHONPATH`，不传命令行参数，并在异常文本中
+    隐藏实际凭据。前端仍没有 Tauri Shell 或文件系统权限。
 
 ## 当前限制与下一阶段
 
@@ -176,8 +180,10 @@
 
 当前输入仍必须是带 `.rpy/.rpym` 源脚本的 Ren'Py 项目，不支持普通玩家通常拿到的所有成品
 游戏，也没有 Windows 安装包或一键自动启动的完整副本体验。现代工作台仍要求用户提供 SDK、
-endpoint、模型和 API key，并依赖仓库 Python 环境；尚未把 Python 后端打包成 sidecar。后续
-里程碑必须逐步缩小这一差距，并对无法处理的封装、加密或魔改格式返回明确的不支持结果。
+endpoint、模型和 API key；其运行时已使用固定 Python sidecar，不再依赖仓库 `.venv`，但从源码
+构建仍需要 Python、固定 PyInstaller、Node.js 和 Rust。当前 sidecar 只为 Windows MSVC 主机生成，
+未签名、未做自动更新，也尚未在真实商业 Provider 上验证。后续里程碑必须逐步缩小剩余差距，
+并对无法处理的封装、加密或魔改格式返回明确的不支持结果。
 
 ## 计划模块
 
@@ -244,7 +250,8 @@ OpenAI 兼容同步 HTTP 适配器；没有 Agent 子进程或外部会话，兼
 [ADR 0015](decisions/0015-persist-translation-quality-reports.md)，首个自动纵向流程见
 [ADR 0016](decisions/0016-automatic-renpy-provider-workflow.md)，最小玩家界面与进度边界见
 [ADR 0017](decisions/0017-minimal-windows-player-interface.md)，现代 Tauri 工作台与进程桥见
-[ADR 0018](decisions/0018-typescript-tauri-player-workbench.md)。
+[ADR 0018](decisions/0018-typescript-tauri-player-workbench.md)，固定 Python sidecar 打包与运行边界见
+[ADR 0020](decisions/0020-packaged-python-tauri-sidecar.md)。
 
 ## Ren'Py 兼容性识别边界
 
