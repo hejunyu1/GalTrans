@@ -159,6 +159,17 @@
   - 现代界面的 API key 开始后立即从 React 状态清空，只通过 Python 子进程标准输入传递；Rust
     显式移除 `GALTRANS_API_KEY`、`PYTHONHOME` 和 `PYTHONPATH`，不传命令行参数，并在异常文本中
     隐藏实际凭据。前端仍没有 Tauri Shell 或文件系统权限。
+- Ren'Py 普通成品源码导入边界：
+  - 只接受兼容性状态为 `packaged_requires_import`、调用方显式确认有权本地处理的输入。
+  - 当前白名单只有官方普通 `RPA-3.0` 单段条目；只物化可识别编码的 `.rpy/.rpym` 原始字节。
+  - zlib 索引有压缩和解压上限；pickle 反序列化只映射普通字典/列表和 Ren'Py 官方可回滚容器，
+    拒绝其他全局类型、持久化引用、尾随数据和异常结构。
+  - 索引中的编译脚本与已有 `tl` 文件只进入忽略清单，不按条目读取或解释正文、不反编译也不
+    复制；其他资源同样不进入输出，整包字节只用于归档 SHA-256，因此结果只是 source-only 快照。
+  - 输出必须是原游戏之外尚不存在的新目录，以同盘暂存和原子重命名发布；关闭式 v1 清单记录
+    授权断言、输入归档/索引/源码 SHA-256、原始偏移、编码和稳定导入 ID。
+  - 未知或自定义头部、多段/前缀记录、危险路径、大小或数量超限、归档变化和 Windows 路径冲突
+    都会在发布前失败关闭并清理暂存树。该内部接口尚未连接工作台、CLI、自动翻译、SDK 或 Provider。
 
 ## 当前限制与下一阶段
 
@@ -182,12 +193,14 @@
 质量判断、自动二次审校、术语或文风保证。命令完成 lint 与 compile，但不会自动启动游戏，也
 不检查像素、实际显示译文、字体、文本溢出或交互路线。
 
-当前输入仍必须是带 `.rpy/.rpym` 源脚本的 Ren'Py 项目，不支持普通玩家通常拿到的所有成品
-游戏，也没有 Windows 安装包或一键自动启动的完整副本体验。现代工作台仍要求用户提供 SDK、
-endpoint、模型和 API key；其运行时已使用固定 Python sidecar，不再依赖仓库 `.venv`，但从源码
-构建仍需要 Python、固定 PyInstaller、Node.js 和 Rust。当前 sidecar 只为 Windows MSVC 主机生成，
-未签名、未做自动更新，也尚未在真实商业 Provider 上验证。后续里程碑必须逐步缩小剩余差距，
-并对无法处理的封装、加密或魔改格式返回明确的不支持结果。
+当前自动流程仍必须接收带 `.rpy/.rpym` 的 source-only Ren'Py 项目。V0.4.4 内部导入器能从一个
+非常窄的官方普通 RPA 子集中建立可审计源码快照，但未接入界面或自动流程，也不能处理通常只有
+`.rpyc/.rpymc` 的普通成品；因此当前仍不支持普通玩家拿到的绝大多数成品游戏，也没有 Windows
+安装包或一键自动启动的完整副本体验。现代工作台仍要求用户提供 SDK、endpoint、模型和 API key；
+其运行时已使用固定 Python sidecar，不再依赖仓库 `.venv`，但从源码构建仍需要 Python、固定
+PyInstaller、Node.js 和 Rust。当前 sidecar 只为 Windows MSVC 主机生成，未签名、未做自动更新，
+也尚未在真实商业 Provider 上验证。后续里程碑必须逐步缩小剩余差距，并对无法处理的封装、加密
+或魔改格式返回明确的不支持结果。
 
 ## 计划模块
 
@@ -273,6 +286,34 @@ sidecar 调用该接口并重新校验完整关闭式报告，React 只负责展
 翻译；报告仍不接 CLI、Tkinter、Provider、工作区、导出或启动流程。识别边界见
 [ADR 0019](decisions/0019-read-only-renpy-compatibility-report.md)，桌面接入见
 [ADR 0021](decisions/0021-tauri-renpy-compatibility-report.md)。
+
+## Ren'Py 普通成品源码导入边界
+
+`adapters.renpy.packaged_import` 不把扩展名识别直接当作导入许可。调用方必须传入关闭式
+`USER_CONFIRMED_LOCAL_PROCESSING` 授权断言，输入还必须重新通过 v1 兼容性报告并得到
+`packaged_requires_import`；应用只能记录用户断言，不能自行判断版权许可、DRM 或合同条件。
+
+当前唯一支持矩阵是官方普通 `RPA-3.0`：头部直接给出十六进制索引偏移和 XOR 元数据键，文件
+正文是原始字节，尾部是 zlib 压缩 pickle 索引。XOR 只还原偏移和长度，不解密文件正文。边界只
+接受一个空前缀的单段范围，并验证每个范围完全位于索引之前；RPA-1.0/2.0、未知或自定义头部、
+多段兼容记录、外部 loader、加密、混淆和损坏格式均不猜测。pickle 不是通用加载：受限
+Unpickler 只把 `renpy.python`/`renpy.revertable` 的 `RevertableDict`/`RevertableList` 映射为内建
+容器，其余类和持久化引用全部拒绝，随后还逐层验证根字典、路径、列表、元组、整数和范围。
+
+导入器遍历所有由兼容性报告列出的 RPA；任何一个不在白名单都会使整次导入失败。它只读取、
+验证并保存非 `tl` 的 `.rpy/.rpym`，保持内容原始字节不变。`.rpyc/.rpymc` 和 `tl` 路径只进入
+审计清单，不按条目读取或解释；其他资源只计入总条目数，整包顺序读取仅用于 SHA-256。默认限制
+为 128 个归档、单个归档 8 GiB、全部归档
+32 GiB、每个压缩或解压索引 32 MiB、每个归档 50,000 项、单个源码 16 MiB、全部源码 128 MiB；
+调用方可以进一步收紧，但不能关闭或放大限制。路径必须是 NFC 正斜杠相对路径，并额外拒绝
+Windows 保留名、非法字符、大小写折叠冲突、`game` 重复前缀和目录穿越。
+
+所有内容先进入输出同一父目录的临时树。`galtrans-import.json` v1 记录来源项目、授权断言、稳定
+导入 ID、归档大小与 SHA-256、解压索引 SHA-256、条目数量，以及每个源码的归档路径、条目名、
+偏移、大小、编码和 SHA-256。发布前再次复核归档文件身份、大小和修改时间；最终目录已存在、
+与输入重叠或输入变化时清理临时树。结果只足以作为现有 source-only 边界的候选输入，不授予
+翻译、SDK、Provider、导出或启动权限。详细决定见
+[ADR 0022](decisions/0022-audited-plain-rpa3-source-import.md)。
 
 ## 稳定 ID
 

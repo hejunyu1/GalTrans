@@ -320,7 +320,7 @@ def _summary_for(status: RenpyCompatibilityStatus) -> str:
             "发现可读的 Ren'Py 源脚本；当前 source-only 流程可以继续。"
         ),
         RenpyCompatibilityStatus.PACKAGED_REQUIRES_IMPORT: (
-            "已识别为 Ren'Py 成品结构，但只有编译脚本或归档；当前版本不会解包或反编译。"
+            "已识别为 Ren'Py 成品结构；当前自动流程不能直接继续，且不会反编译编译脚本。"
         ),
         RenpyCompatibilityStatus.UNCERTAIN: (
             "发现部分 Ren'Py 线索，但证据不足或扫描不完整；已安全停止。"

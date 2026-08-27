@@ -23,7 +23,7 @@ export function compatibilityPresentation(
     packaged_requires_import: {
       label: "已识别成品，当前不能导入",
       nextStep:
-        "GalTrans 不会解包 RPA 或反编译 RPYc。请保留原目录，等待受支持的只读导入能力。",
+        "当前工作台不会打开 RPA 或反编译 RPYc。请保留原目录；V0.4.4 的受限导入边界尚未接入界面。",
       tone: "blocked",
     },
     uncertain: {

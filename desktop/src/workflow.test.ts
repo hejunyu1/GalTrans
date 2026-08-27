@@ -85,7 +85,7 @@ describe("player workflow helpers", () => {
     ).toContain("先运行");
 
     const packaged = report("packaged_requires_import");
-    expect(compatibleProjectError(packaged, validForm.projectPath)).toContain("不会解包");
+    expect(compatibleProjectError(packaged, validForm.projectPath)).toContain("当前工作台");
     expect(compatibilityPresentation(packaged)).toMatchObject({
       label: "已识别成品，当前不能导入",
       tone: "blocked",

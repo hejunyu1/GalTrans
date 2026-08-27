@@ -127,7 +127,7 @@ class OpenAICompatibleProviderTests(unittest.TestCase):
         headers, payload = server.requests[0]
         self.assertEqual(headers["Authorization"], f"Bearer {api_key}")
         self.assertEqual(headers["Idempotency-Key"], request_id)
-        self.assertEqual(headers["User-Agent"], "GalTrans/0.4.3")
+        self.assertEqual(headers["User-Agent"], "GalTrans/0.4.4")
         self.assertEqual(payload["model"], "test-model")
         self.assertEqual(payload["response_format"], {"type": "json_object"})
         serialized_request = json.dumps(payload, ensure_ascii=False)

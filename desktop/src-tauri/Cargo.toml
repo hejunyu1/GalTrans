@@ -1,6 +1,6 @@
 [package]
 name = "galtrans-desktop"
-version = "0.4.3"
+version = "0.4.4"
 description = "GalTrans player desktop interface"
 authors = ["GalTrans contributors"]
 edition = "2024"

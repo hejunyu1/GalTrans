@@ -18,6 +18,16 @@ from galtrans.adapters.renpy.exporter import (
 )
 from galtrans.adapters.renpy.extractor import extract_renpy_file, extract_renpy_path
 from galtrans.adapters.renpy.launch import RenpyLaunchValidation, validate_renpy_launch
+from galtrans.adapters.renpy.packaged_import import (
+    RENPY_PACKAGED_IMPORT_MANIFEST_SCHEMA_VERSION,
+    RenpyImportAuthorization,
+    RenpyImportedArchive,
+    RenpyImportedSource,
+    RenpyPackagedImportError,
+    RenpyPackagedImportManifest,
+    RenpyPackagedImportResult,
+    import_renpy_packaged_sources,
+)
 from galtrans.adapters.renpy.proposals import (
     RenpyProposalPreparationError,
     prepare_renpy_translation_files,
@@ -46,6 +56,7 @@ from galtrans.adapters.renpy.template import (
 
 __all__ = [
     "RENPY_COMPATIBILITY_REPORT_SCHEMA_VERSION",
+    "RENPY_PACKAGED_IMPORT_MANIFEST_SCHEMA_VERSION",
     "OfficialTemplate",
     "OfficialTemplateEntry",
     "RenderedRenpyFile",
@@ -56,7 +67,13 @@ __all__ = [
     "RenpyCompatibilityStatus",
     "RenpyExportError",
     "RenpyExportValidation",
+    "RenpyImportAuthorization",
+    "RenpyImportedArchive",
+    "RenpyImportedSource",
     "RenpyLaunchValidation",
+    "RenpyPackagedImportError",
+    "RenpyPackagedImportManifest",
+    "RenpyPackagedImportResult",
     "RenpyProposalPreparationError",
     "RenpyRenderError",
     "RenpySdkCrosscheck",
@@ -69,6 +86,7 @@ __all__ = [
     "crosscheck_renpy_sdk",
     "extract_renpy_file",
     "extract_renpy_path",
+    "import_renpy_packaged_sources",
     "inspect_renpy_compatibility",
     "prepare_renpy_translation_files",
     "read_official_translation_templates",
