@@ -2,9 +2,14 @@ from __future__ import annotations
 
 import io
 import json
+import tempfile
 import unittest
 from pathlib import Path
 
+from galtrans.adapters.renpy.compatibility import (
+    RenpyCompatibilityReport,
+    RenpyCompatibilityStatus,
+)
 from galtrans.automated import (
     AutomatedRenpyTranslationProgress,
     AutomatedRenpyTranslationResult,
@@ -33,7 +38,8 @@ def _result() -> AutomatedRenpyTranslationResult:
 def _request(secret: str = "desktop-test-secret") -> str:
     return json.dumps(
         {
-            "schema_version": 1,
+            "schema_version": 2,
+            "operation": "translate",
             "sdk_path": "C:/sdk",
             "project_path": "C:/project",
             "output_path": "C:/output",
@@ -42,6 +48,41 @@ def _request(secret: str = "desktop-test-secret") -> str:
             "api_key": secret,
         }
     )
+
+
+def _compatibility(
+    status: RenpyCompatibilityStatus = RenpyCompatibilityStatus.SOURCE_READY,
+) -> RenpyCompatibilityReport:
+    source_scripts = (
+        ("game/script.rpy",)
+        if status is RenpyCompatibilityStatus.SOURCE_READY
+        else ()
+    )
+    compiled_scripts = (
+        ("game/script.rpyc",)
+        if status is RenpyCompatibilityStatus.PACKAGED_REQUIRES_IMPORT
+        else ()
+    )
+    return RenpyCompatibilityReport(
+        schema_version=1,
+        selected_root=Path("C:/project"),
+        project_root=Path("C:/project"),
+        game_directory="game",
+        status=status,
+        summary="compatibility test",
+        source_scripts=source_scripts,
+        compiled_scripts=compiled_scripts,
+        archives=(),
+        translation_files=(),
+        launchers=(),
+        runtime_markers=(),
+        version_hints=(),
+        issues=(),
+    )
+
+
+def _ready_compatibility(_path: Path) -> RenpyCompatibilityReport:
+    return _compatibility()
 
 
 class DesktopBridgeTests(unittest.TestCase):
@@ -66,7 +107,12 @@ class DesktopBridgeTests(unittest.TestCase):
             )
             return _result()
 
-        exit_code = run_desktop_bridge(io.StringIO(_request()), output, execute)
+        exit_code = run_desktop_bridge(
+            io.StringIO(_request()),
+            output,
+            execute,
+            _ready_compatibility,
+        )
         events = [json.loads(line) for line in output.getvalue().splitlines()]
 
         self.assertEqual(exit_code, 0)
@@ -74,7 +120,7 @@ class DesktopBridgeTests(unittest.TestCase):
         self.assertEqual(
             events[0],
             {
-                "schema_version": 1,
+                "schema_version": 2,
                 "type": "progress",
                 "stage": "translating",
                 "message": "翻译批次 1/2",
@@ -85,6 +131,69 @@ class DesktopBridgeTests(unittest.TestCase):
         self.assertEqual(events[1]["type"], "succeeded")
         self.assertEqual(events[1]["result"]["output_root"], "C:\\output")
         self.assertNotIn("desktop-test-secret", output.getvalue())
+
+    def test_translation_rechecks_source_ready_before_executor(self) -> None:
+        output = io.StringIO()
+
+        def execute(
+            _request: PlayerTranslationRequest,
+            _progress_callback: object,
+        ) -> AutomatedRenpyTranslationResult:
+            raise AssertionError("成品输入不得进入翻译执行器")
+
+        def inspect(_path: Path) -> RenpyCompatibilityReport:
+            return _compatibility(RenpyCompatibilityStatus.PACKAGED_REQUIRES_IMPORT)
+
+        exit_code = run_desktop_bridge(
+            io.StringIO(_request()),
+            output,
+            execute,
+            inspect,
+        )
+        event = json.loads(output.getvalue())
+
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(event["type"], "failed")
+        self.assertIn("兼容性检查未通过", event["message"])
+
+    def test_emits_read_only_compatibility_report_without_translation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            game = root / "game"
+            game.mkdir()
+            source = game / "script.rpy"
+            source.write_text("label start:\n    pass\n", encoding="utf-8")
+            before = source.read_bytes()
+            output = io.StringIO()
+
+            def execute(
+                _request: PlayerTranslationRequest,
+                _progress_callback: object,
+            ) -> AutomatedRenpyTranslationResult:
+                raise AssertionError("兼容性检查不得进入翻译执行器")
+
+            exit_code = run_desktop_bridge(
+                io.StringIO(
+                    json.dumps(
+                        {
+                            "schema_version": 2,
+                            "operation": "inspect_renpy_compatibility",
+                            "project_path": str(root),
+                        }
+                    )
+                ),
+                output,
+                execute,
+            )
+            event = json.loads(output.getvalue())
+
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(event["schema_version"], 2)
+            self.assertEqual(event["type"], "compatibility_report")
+            self.assertEqual(event["report"]["schema_version"], 1)
+            self.assertEqual(event["report"]["status"], "source_ready")
+            self.assertTrue(event["report"]["can_translate_now"])
+            self.assertEqual(source.read_bytes(), before)
 
     def test_rejects_unknown_fields_before_executor(self) -> None:
         payload = json.loads(_request())
@@ -108,6 +217,32 @@ class DesktopBridgeTests(unittest.TestCase):
         self.assertEqual(event["type"], "failed")
         self.assertIn("字段不匹配", event["message"])
 
+    def test_rejects_unknown_compatibility_fields_before_inspection(self) -> None:
+        output = io.StringIO()
+
+        def inspect(_path: Path) -> RenpyCompatibilityReport:
+            raise AssertionError("无效请求不得进入兼容性检查器")
+
+        exit_code = run_desktop_bridge(
+            io.StringIO(
+                json.dumps(
+                    {
+                        "schema_version": 2,
+                        "operation": "inspect_renpy_compatibility",
+                        "project_path": "C:/project",
+                        "unexpected": True,
+                    }
+                )
+            ),
+            output,
+            compatibility_executor=inspect,
+        )
+        event = json.loads(output.getvalue())
+
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(event["type"], "failed")
+        self.assertIn("字段不匹配", event["message"])
+
     def test_redacts_key_from_unexpected_executor_error(self) -> None:
         secret = "desktop-secret-must-not-leak"
         output = io.StringIO()
@@ -122,6 +257,7 @@ class DesktopBridgeTests(unittest.TestCase):
             io.StringIO(_request(secret)),
             output,
             execute,
+            _ready_compatibility,
         )
 
         self.assertEqual(exit_code, 1)

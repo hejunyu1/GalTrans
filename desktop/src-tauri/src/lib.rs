@@ -10,7 +10,7 @@ use tauri::{AppHandle, Emitter, Manager};
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 
-const BRIDGE_SCHEMA_VERSION: u32 = 1;
+const BRIDGE_SCHEMA_VERSION: u32 = 2;
 const MAX_BRIDGE_LINE_BYTES: u64 = 256 * 1024;
 const MAX_STDERR_BYTES: u64 = 16 * 1024;
 const BACKEND_BINARY_NAME: &str = "galtrans-backend.exe";
@@ -26,6 +26,21 @@ const ALLOWED_STAGES: [&str; 9] = [
     "validating_export",
     "publishing",
     "completed",
+];
+const ALLOWED_COMPATIBILITY_STATUSES: [&str; 4] = [
+    "source_ready",
+    "packaged_requires_import",
+    "uncertain",
+    "not_renpy",
+];
+const ALLOWED_COMPATIBILITY_ISSUES: [&str; 7] = [
+    "symlink_skipped",
+    "depth_limit_reached",
+    "entry_limit_reached",
+    "directory_unreadable",
+    "mixed_source_and_packaged",
+    "weak_archive_evidence",
+    "version_hint_unreadable",
 ];
 
 #[derive(Default)]
@@ -52,15 +67,28 @@ struct FrontendTranslationRequest {
     api_key: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct FrontendCompatibilityRequest {
+    project_path: String,
+}
+
 #[derive(Serialize)]
-struct BridgeRequest<'a> {
-    schema_version: u32,
-    sdk_path: &'a str,
-    project_path: &'a str,
-    output_path: &'a str,
-    endpoint: &'a str,
-    model: &'a str,
-    api_key: &'a str,
+#[serde(tag = "operation", rename_all = "snake_case")]
+enum BridgeRequest<'a> {
+    Translate {
+        schema_version: u32,
+        sdk_path: &'a str,
+        project_path: &'a str,
+        output_path: &'a str,
+        endpoint: &'a str,
+        model: &'a str,
+        api_key: &'a str,
+    },
+    InspectRenpyCompatibility {
+        schema_version: u32,
+        project_path: &'a str,
+    },
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -76,6 +104,10 @@ enum BridgeEvent {
     Succeeded {
         schema_version: u32,
         result: TranslationResult,
+    },
+    CompatibilityReport {
+        schema_version: u32,
+        report: CompatibilityReport,
     },
     Failed {
         schema_version: u32,
@@ -96,6 +128,52 @@ struct TranslationResult {
     output_root: String,
     translation_files: Vec<String>,
     sdk_version: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct CompatibilityReport {
+    schema_version: u32,
+    selected_root: String,
+    project_root: String,
+    game_directory: Option<String>,
+    status: String,
+    summary: String,
+    can_translate_now: bool,
+    counts: CompatibilityCounts,
+    source_scripts: Vec<String>,
+    compiled_scripts: Vec<String>,
+    archives: Vec<String>,
+    translation_files: Vec<String>,
+    launchers: Vec<String>,
+    runtime_markers: Vec<String>,
+    version_hints: Vec<CompatibilityVersionHint>,
+    issues: Vec<CompatibilityIssue>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct CompatibilityCounts {
+    source_scripts: u32,
+    compiled_scripts: u32,
+    archives: u32,
+    translation_files: u32,
+    launchers: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct CompatibilityVersionHint {
+    version: String,
+    relative_path: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct CompatibilityIssue {
+    code: String,
+    relative_path: String,
+    message: String,
 }
 
 fn checked_text(
@@ -126,10 +204,74 @@ fn validate_request(request: &FrontendTranslationRequest) -> Result<(), String> 
     Ok(())
 }
 
+fn validate_compatibility_request(request: &FrontendCompatibilityRequest) -> Result<(), String> {
+    checked_text(&request.project_path, "游戏目录", 32767, false)
+}
+
+fn validate_compatibility_report(report: &CompatibilityReport) -> Result<(), String> {
+    if report.schema_version != 1 {
+        return Err("Python 桥接兼容性报告版本不受支持".into());
+    }
+    checked_text(&report.selected_root, "所选目录", 32767, true)?;
+    checked_text(&report.project_root, "项目目录", 32767, true)?;
+    checked_text(&report.summary, "兼容性摘要", 2000, true)?;
+    if let Some(game_directory) = &report.game_directory {
+        checked_text(game_directory, "game 目录", 32767, true)?;
+    }
+    if !ALLOWED_COMPATIBILITY_STATUSES.contains(&report.status.as_str()) {
+        return Err("Python 桥接返回未知兼容性状态".into());
+    }
+    if report.can_translate_now != (report.status == "source_ready") {
+        return Err("Python 桥接兼容性状态与可翻译标记矛盾".into());
+    }
+    if report.counts.source_scripts as usize != report.source_scripts.len()
+        || report.counts.compiled_scripts as usize != report.compiled_scripts.len()
+        || report.counts.archives as usize != report.archives.len()
+        || report.counts.translation_files as usize != report.translation_files.len()
+        || report.counts.launchers as usize != report.launchers.len()
+    {
+        return Err("Python 桥接兼容性报告计数不一致".into());
+    }
+    if report.status == "source_ready" && report.source_scripts.is_empty() {
+        return Err("Python 桥接可翻译报告没有源脚本".into());
+    }
+    if report.status == "packaged_requires_import"
+        && report.compiled_scripts.is_empty()
+        && report.archives.is_empty()
+    {
+        return Err("Python 桥接成品报告没有成品文件证据".into());
+    }
+
+    for path in report
+        .source_scripts
+        .iter()
+        .chain(&report.compiled_scripts)
+        .chain(&report.archives)
+        .chain(&report.translation_files)
+        .chain(&report.launchers)
+        .chain(&report.runtime_markers)
+    {
+        checked_text(path, "兼容性报告路径", 32767, true)?;
+    }
+    for hint in &report.version_hints {
+        checked_text(&hint.version, "Ren'Py 版本线索", 200, false)?;
+        checked_text(&hint.relative_path, "版本线索路径", 32767, true)?;
+    }
+    for issue in &report.issues {
+        if !ALLOWED_COMPATIBILITY_ISSUES.contains(&issue.code.as_str()) {
+            return Err("Python 桥接返回未知兼容性问题代码".into());
+        }
+        checked_text(&issue.relative_path, "兼容性问题路径", 32767, true)?;
+        checked_text(&issue.message, "兼容性问题说明", 2000, true)?;
+    }
+    Ok(())
+}
+
 fn validate_event(event: &BridgeEvent) -> Result<(), String> {
     let schema_version = match event {
         BridgeEvent::Progress { schema_version, .. }
         | BridgeEvent::Succeeded { schema_version, .. }
+        | BridgeEvent::CompatibilityReport { schema_version, .. }
         | BridgeEvent::Failed { schema_version, .. } => *schema_version,
     };
     if schema_version != BRIDGE_SCHEMA_VERSION {
@@ -187,6 +329,9 @@ fn validate_event(event: &BridgeEvent) -> Result<(), String> {
                 checked_text(translation_file, "翻译文件", 32767, true)?;
             }
         }
+        BridgeEvent::CompatibilityReport { report, .. } => {
+            validate_compatibility_report(report)?;
+        }
         BridgeEvent::Failed { message, .. } => {
             checked_text(message, "失败消息", 4000, true)?;
         }
@@ -228,7 +373,29 @@ fn redact_secret(message: &str, secret: &str) -> String {
     }
 }
 
-fn run_python_bridge(app: AppHandle, request: FrontendTranslationRequest) -> Result<(), String> {
+#[derive(Clone, Copy)]
+enum ExpectedOperation {
+    Translation,
+    Compatibility,
+}
+
+#[derive(Clone)]
+enum BridgeTerminal {
+    TranslationSucceeded,
+    CompatibilityReport(CompatibilityReport),
+    Failed(String),
+}
+
+fn run_bridge<F>(
+    app: &AppHandle,
+    request_json: &[u8],
+    expected_operation: ExpectedOperation,
+    secret: &str,
+    mut handle_event: F,
+) -> Result<BridgeTerminal, String>
+where
+    F: FnMut(&BridgeEvent) -> Result<(), String>,
+{
     let resource_directory = app
         .path()
         .resource_dir()
@@ -241,18 +408,6 @@ fn run_python_bridge(app: AppHandle, request: FrontendTranslationRequest) -> Res
         ));
     }
 
-    let bridge_request = BridgeRequest {
-        schema_version: BRIDGE_SCHEMA_VERSION,
-        sdk_path: &request.sdk_path,
-        project_path: &request.project_path,
-        output_path: &request.output_path,
-        endpoint: &request.endpoint,
-        model: &request.model,
-        api_key: &request.api_key,
-    };
-    let request_json =
-        serde_json::to_vec(&bridge_request).map_err(|_| "无法编码桌面翻译请求".to_string())?;
-
     let mut child = backend_command(&backend, &resource_directory)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -262,7 +417,7 @@ fn run_python_bridge(app: AppHandle, request: FrontendTranslationRequest) -> Res
 
     let mut stdin = child.stdin.take().ok_or("无法连接 Python 后端输入")?;
     stdin
-        .write_all(&request_json)
+        .write_all(request_json)
         .and_then(|()| stdin.write_all(b"\n"))
         .and_then(|()| stdin.flush())
         .map_err(|error| format!("无法发送桌面翻译请求：{error}"))?;
@@ -273,8 +428,7 @@ fn run_python_bridge(app: AppHandle, request: FrontendTranslationRequest) -> Res
     let stderr_thread = thread::spawn(move || read_limited_stderr(stderr));
 
     let mut reader = BufReader::new(stdout);
-    let mut saw_terminal = false;
-    let mut terminal_succeeded = false;
+    let mut terminal: Option<BridgeTerminal> = None;
     let bridge_result = loop {
         let mut bytes = Vec::new();
         let read_result = reader
@@ -286,11 +440,9 @@ fn run_python_bridge(app: AppHandle, request: FrontendTranslationRequest) -> Res
             Err(error) => break Err(format!("读取 Python 后端事件失败：{error}")),
         };
         if count == 0 {
-            break if saw_terminal {
-                Ok(())
-            } else {
-                Err("Python 后端结束前没有返回最终结果".into())
-            };
+            break terminal
+                .clone()
+                .ok_or_else(|| "Python 后端结束前没有返回最终结果".to_string());
         }
         if bytes.len() > MAX_BRIDGE_LINE_BYTES as usize {
             break Err("Python 后端事件超过 256 KiB".into());
@@ -301,7 +453,7 @@ fn run_python_bridge(app: AppHandle, request: FrontendTranslationRequest) -> Res
         if bytes.is_empty() {
             break Err("Python 后端返回空事件".into());
         }
-        if saw_terminal {
+        if terminal.is_some() {
             break Err("Python 后端在最终结果后继续输出事件".into());
         }
         let event: BridgeEvent = match serde_json::from_slice(&bytes) {
@@ -311,16 +463,21 @@ fn run_python_bridge(app: AppHandle, request: FrontendTranslationRequest) -> Res
         if let Err(error) = validate_event(&event) {
             break Err(error);
         }
-        match &event {
-            BridgeEvent::Succeeded { .. } => {
-                saw_terminal = true;
-                terminal_succeeded = true;
+        match (&event, expected_operation) {
+            (BridgeEvent::Progress { .. }, ExpectedOperation::Translation) => {}
+            (BridgeEvent::Succeeded { .. }, ExpectedOperation::Translation) => {
+                terminal = Some(BridgeTerminal::TranslationSucceeded);
             }
-            BridgeEvent::Failed { .. } => saw_terminal = true,
-            BridgeEvent::Progress { .. } => {}
+            (BridgeEvent::CompatibilityReport { report, .. }, ExpectedOperation::Compatibility) => {
+                terminal = Some(BridgeTerminal::CompatibilityReport(report.clone()));
+            }
+            (BridgeEvent::Failed { message, .. }, _) => {
+                terminal = Some(BridgeTerminal::Failed(message.clone()));
+            }
+            _ => break Err("Python 后端返回了与请求操作不匹配的事件".into()),
         }
-        if let Err(error) = app.emit("translation-event", &event) {
-            break Err(format!("无法向窗口发送翻译事件：{error}"));
+        if let Err(error) = handle_event(&event) {
+            break Err(error);
         }
     };
 
@@ -333,18 +490,72 @@ fn run_python_bridge(app: AppHandle, request: FrontendTranslationRequest) -> Res
     let stderr_text = stderr_thread
         .join()
         .map_err(|_| "读取 Python 后端错误输出的线程失败".to_string())?;
-    bridge_result?;
+    let terminal = bridge_result?;
 
-    if terminal_succeeded && !status.success() {
-        return Err(redact_secret(
-            &format!("Python 后端成功事件后的退出码异常：{status} {stderr_text}"),
-            &request.api_key,
-        ));
+    match (&terminal, status.success()) {
+        (BridgeTerminal::TranslationSucceeded | BridgeTerminal::CompatibilityReport(_), false) => {
+            return Err(redact_secret(
+                &format!("Python 后端成功事件后的退出码异常：{status} {stderr_text}"),
+                secret,
+            ));
+        }
+        (BridgeTerminal::Failed(_), true) => {
+            return Err("Python 后端报告失败但退出码为成功".into());
+        }
+        _ => {}
     }
-    if !terminal_succeeded && status.success() {
-        return Err("Python 后端报告失败但退出码为成功".into());
+    Ok(terminal)
+}
+
+fn run_python_bridge(app: AppHandle, request: FrontendTranslationRequest) -> Result<(), String> {
+    let bridge_request = BridgeRequest::Translate {
+        schema_version: BRIDGE_SCHEMA_VERSION,
+        sdk_path: &request.sdk_path,
+        project_path: &request.project_path,
+        output_path: &request.output_path,
+        endpoint: &request.endpoint,
+        model: &request.model,
+        api_key: &request.api_key,
+    };
+    let request_json =
+        serde_json::to_vec(&bridge_request).map_err(|_| "无法编码桌面翻译请求".to_string())?;
+    let terminal = run_bridge(
+        &app,
+        &request_json,
+        ExpectedOperation::Translation,
+        &request.api_key,
+        |event| {
+            app.emit("translation-event", event)
+                .map_err(|error| format!("无法向窗口发送翻译事件：{error}"))
+        },
+    )?;
+    match terminal {
+        BridgeTerminal::TranslationSucceeded | BridgeTerminal::Failed(_) => Ok(()),
+        BridgeTerminal::CompatibilityReport(_) => Err("Python 后端返回了意外的兼容性报告".into()),
     }
-    Ok(())
+}
+
+fn run_compatibility_bridge(
+    app: AppHandle,
+    request: FrontendCompatibilityRequest,
+) -> Result<CompatibilityReport, String> {
+    let bridge_request = BridgeRequest::InspectRenpyCompatibility {
+        schema_version: BRIDGE_SCHEMA_VERSION,
+        project_path: &request.project_path,
+    };
+    let request_json =
+        serde_json::to_vec(&bridge_request).map_err(|_| "无法编码桌面兼容性请求".to_string())?;
+    match run_bridge(
+        &app,
+        &request_json,
+        ExpectedOperation::Compatibility,
+        "",
+        |_| Ok(()),
+    )? {
+        BridgeTerminal::CompatibilityReport(report) => Ok(report),
+        BridgeTerminal::Failed(message) => Err(message),
+        BridgeTerminal::TranslationSucceeded => Err("Python 后端返回了意外的翻译结果".into()),
+    }
 }
 
 #[tauri::command]
@@ -370,12 +581,38 @@ async fn start_translation(
     .map_err(|error| format!("桌面后台任务异常结束：{error}"))?
 }
 
+#[tauri::command]
+async fn inspect_renpy_compatibility(
+    app: AppHandle,
+    request: FrontendCompatibilityRequest,
+) -> Result<CompatibilityReport, String> {
+    validate_compatibility_request(&request)?;
+    let state = app.state::<AppState>();
+    if state
+        .running
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return Err("已有 GalTrans 任务正在运行".into());
+    }
+    let running = Arc::clone(&state.running);
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = RunningGuard(running);
+        run_compatibility_bridge(app, request)
+    })
+    .await
+    .map_err(|error| format!("桌面兼容性检查异常结束：{error}"))?
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .manage(AppState::default())
         .plugin(tauri_plugin_dialog::init())
-        .invoke_handler(tauri::generate_handler![start_translation])
+        .invoke_handler(tauri::generate_handler![
+            inspect_renpy_compatibility,
+            start_translation
+        ])
         .setup(|app| {
             if let Some(window) = app.get_webview_window("main") {
                 window.set_focus()?;
@@ -425,12 +662,45 @@ mod tests {
         invalid = request();
         invalid.output_path = "bad\npath".into();
         assert!(validate_request(&invalid).is_err());
+
+        let compatibility = FrontendCompatibilityRequest {
+            project_path: r"C:\game".into(),
+        };
+        assert!(validate_compatibility_request(&compatibility).is_ok());
+    }
+
+    #[test]
+    fn bridge_requests_use_explicit_v2_operations() {
+        let translation = BridgeRequest::Translate {
+            schema_version: BRIDGE_SCHEMA_VERSION,
+            sdk_path: r"C:\sdk",
+            project_path: r"C:\project",
+            output_path: r"C:\output",
+            endpoint: "https://provider.example/v1/chat/completions",
+            model: "test-model",
+            api_key: "test-secret",
+        };
+        let translation_json = serde_json::to_value(translation).unwrap();
+        assert_eq!(translation_json["schema_version"], 2);
+        assert_eq!(translation_json["operation"], "translate");
+
+        let compatibility = BridgeRequest::InspectRenpyCompatibility {
+            schema_version: BRIDGE_SCHEMA_VERSION,
+            project_path: r"C:\project",
+        };
+        let compatibility_json = serde_json::to_value(compatibility).unwrap();
+        assert_eq!(compatibility_json["schema_version"], 2);
+        assert_eq!(
+            compatibility_json["operation"],
+            "inspect_renpy_compatibility"
+        );
+        assert_eq!(compatibility_json.as_object().unwrap().len(), 3);
     }
 
     #[test]
     fn bridge_events_reject_unknown_stage_and_incomplete_batch_counts() {
         let unknown = BridgeEvent::Progress {
-            schema_version: 1,
+            schema_version: 2,
             stage: "unknown".into(),
             message: "test".into(),
             completed_batches: None,
@@ -439,7 +709,7 @@ mod tests {
         assert!(validate_event(&unknown).is_err());
 
         let incomplete = BridgeEvent::Progress {
-            schema_version: 1,
+            schema_version: 2,
             stage: "translating".into(),
             message: "test".into(),
             completed_batches: Some(1),
@@ -451,7 +721,7 @@ mod tests {
     #[test]
     fn bridge_success_rejects_contradictory_quality_results() {
         let valid = BridgeEvent::Succeeded {
-            schema_version: 1,
+            schema_version: 2,
             result: result(),
         };
         assert!(validate_event(&valid).is_ok());
@@ -459,10 +729,66 @@ mod tests {
         let mut contradictory_result = result();
         contradictory_result.quality_outcome = "low_confidence".into();
         let contradictory = BridgeEvent::Succeeded {
-            schema_version: 1,
+            schema_version: 2,
             result: contradictory_result,
         };
         assert!(validate_event(&contradictory).is_err());
+    }
+
+    fn compatibility_report() -> CompatibilityReport {
+        CompatibilityReport {
+            schema_version: 1,
+            selected_root: r"C:\project".into(),
+            project_root: r"C:\project".into(),
+            game_directory: Some("game".into()),
+            status: "source_ready".into(),
+            summary: "发现可读的 Ren'Py 源脚本。".into(),
+            can_translate_now: true,
+            counts: CompatibilityCounts {
+                source_scripts: 1,
+                compiled_scripts: 0,
+                archives: 0,
+                translation_files: 0,
+                launchers: 0,
+            },
+            source_scripts: vec!["game/script.rpy".into()],
+            compiled_scripts: Vec::new(),
+            archives: Vec::new(),
+            translation_files: Vec::new(),
+            launchers: Vec::new(),
+            runtime_markers: Vec::new(),
+            version_hints: Vec::new(),
+            issues: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn compatibility_report_validation_is_closed_and_consistent() {
+        let valid = BridgeEvent::CompatibilityReport {
+            schema_version: 2,
+            report: compatibility_report(),
+        };
+        assert!(validate_event(&valid).is_ok());
+
+        let mut contradictory_report = compatibility_report();
+        contradictory_report.can_translate_now = false;
+        let contradictory = BridgeEvent::CompatibilityReport {
+            schema_version: 2,
+            report: contradictory_report,
+        };
+        assert!(validate_event(&contradictory).is_err());
+
+        let mut unknown_issue_report = compatibility_report();
+        unknown_issue_report.issues.push(CompatibilityIssue {
+            code: "unknown".into(),
+            relative_path: "game".into(),
+            message: "test".into(),
+        });
+        let unknown_issue = BridgeEvent::CompatibilityReport {
+            schema_version: 2,
+            report: unknown_issue_report,
+        };
+        assert!(validate_event(&unknown_issue).is_err());
     }
 
     #[test]

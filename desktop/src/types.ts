@@ -18,6 +18,37 @@ export interface TranslationRequest {
   apiKey: string;
 }
 
+export type RenpyCompatibilityStatus =
+  | "source_ready"
+  | "packaged_requires_import"
+  | "uncertain"
+  | "not_renpy";
+
+export interface RenpyCompatibilityReport {
+  schema_version: 1;
+  selected_root: string;
+  project_root: string;
+  game_directory: string | null;
+  status: RenpyCompatibilityStatus;
+  summary: string;
+  can_translate_now: boolean;
+  counts: {
+    source_scripts: number;
+    compiled_scripts: number;
+    archives: number;
+    translation_files: number;
+    launchers: number;
+  };
+  source_scripts: string[];
+  compiled_scripts: string[];
+  archives: string[];
+  translation_files: string[];
+  launchers: string[];
+  runtime_markers: string[];
+  version_hints: Array<{ version: string; relative_path: string }>;
+  issues: Array<{ code: string; relative_path: string; message: string }>;
+}
+
 export interface TranslationResult {
   task_id: string;
   segment_count: number;
@@ -33,7 +64,7 @@ export interface TranslationResult {
 
 export type TranslationEvent =
   | {
-      schema_version: 1;
+      schema_version: 2;
       type: "progress";
       stage: TranslationStage;
       message: string;
@@ -41,12 +72,12 @@ export type TranslationEvent =
       total_batches: number | null;
     }
   | {
-      schema_version: 1;
+      schema_version: 2;
       type: "succeeded";
       result: TranslationResult;
     }
   | {
-      schema_version: 1;
+      schema_version: 2;
       type: "failed";
       message: string;
     };

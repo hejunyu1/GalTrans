@@ -4,12 +4,13 @@ GalTrans 的长期目标是让普通玩家把自己合法持有、且被工具�
 制作成可以像已有汉化游戏一样启动和游玩的独立个人汉化副本。原游戏目录保持只读，语言模型
 只能提交结构化翻译建议，确定性程序负责游戏文件处理、校验和导出。
 
-V0.4.2 已把第一个真实 OpenAI 兼容 Provider、可恢复翻译状态、确定性质量检查、Ren'Py 渲染和
-隔离验证连接成自动流程，并增加 TypeScript、React 和 Tauri 2 构建的现代 Windows 玩家工作台。
-这一版还新增只读 Ren'Py 兼容性检查：可以区分当前可处理的源码项目、已识别但尚不能导入的
-`.rpa/.rpyc` 成品结构、证据不足的目录和非 Ren'Py 目录。它不会打开归档或反编译脚本；成品游戏
-导入与 Windows 安装包仍未实现。固定 Python 后端现已和 CPython 运行时、标准库及所需模块一起
-冻结为 Tauri Windows sidecar；工作台运行时不再查找仓库 `.venv`、源码目录或 `PYTHONPATH`。
+V0.4.3 已把第一个真实 OpenAI 兼容 Provider、可恢复翻译状态、确定性质量检查、Ren'Py 渲染和
+隔离验证连接成自动流程，并由 TypeScript、React 和 Tauri 2 构建的现代 Windows 玩家工作台承载。
+工作台现在会先显示只读 Ren'Py 兼容性报告：区分当前可处理的源码项目、已识别但尚不能导入的
+`.rpa/.rpyc` 成品结构、证据不足的目录和非 Ren'Py 目录；只有 `source_ready` 会解锁翻译。它不会
+打开归档或反编译脚本，成品游戏导入与 Windows 安装包仍未实现。固定 Python 后端和 CPython
+运行时、标准库及所需模块一起冻结为 Tauri Windows sidecar，运行时不查找仓库 `.venv`、源码
+目录或 `PYTHONPATH`。
 
 V0.2 已支持只读扫描、Ren'Py 文本提取，以及在临时副本上调用官方 SDK 完成导出和基础显示验证：
 
@@ -72,10 +73,12 @@ $env:Path = "$env:USERPROFILE\.cargo\bin;$env:Path"
 npm run tauri dev
 ```
 
-窗口中选择 Ren'Py SDK、带 `game` 目录的源项目和一个尚不存在的输出路径，再填写翻译服务
+窗口中先选择游戏安装根目录、其 `game` 目录或带 `game` 的源码项目。目录选择后会自动执行只读
+兼容性检查；手工填写路径时点击“检查兼容性”。源码项目可继续选择 Ren'Py SDK 和一个尚不存在
+的输出路径，再填写翻译服务
 （Provider）的 Chat Completions URL、模型名和 API key，点击“开始自动汉化”。窗口会显示路径
 检查、提取、SDK 交叉检查、批次翻译、质量检查、渲染、导出验证和发布进度；成功或失败后输入
-控件都会恢复。TypeScript 界面只通过关闭式 JSON/JSONL 桥调用现有 Python 自动服务，不复制
+控件都会恢复。TypeScript 界面只通过关闭式 v2 JSON/JSONL 桥调用 Python 兼容性检查和自动服务，不复制
 游戏处理逻辑。API key 通过标准输入交给固定 Python 子进程，不进入命令行、环境变量、工作区、
 日志或 SDK 参数；开始后输入框立即清空。
 
@@ -207,8 +210,9 @@ SDK、项目、存档或隔离用户数据目录，结束后统一清理。`--ti
 内部 `inspect_renpy_compatibility` 接口会在有界目录扫描中列出松散源脚本、编译脚本、RPA 归档、
 已有 `game/tl` 翻译文件、根目录启动器、运行时目录和可安全读取的版本线索。报告使用关闭式 v1
 结构，只在完整扫描确实发现 `.rpy/.rpym` 时返回 `source_ready`；标准成品结构返回
-`packaged_requires_import`，不完整或相互矛盾的证据返回 `uncertain`。该接口目前尚未连接 CLI
-或桌面工作台，也没有因此获得解包、反编译、复制或启动游戏的能力。
+`packaged_requires_import`，不完整或相互矛盾的证据返回 `uncertain`。Tauri 工作台会显示报告、
+文件计数、版本线索、问题与下一步，并在 `source_ready` 之外安全阻止翻译；CLI 和 Tkinter 回退
+界面尚未连接这份报告。接入没有增加解包、反编译、复制或启动游戏的能力。
 
 Ren'Py 保守提取器已经可以把 `.rpy` 中的常见角色台词、旁白和菜单选项转换为稳定文本段，
 同时标记变量插值、文本标签和转义内容。SDK 交叉验证可以把自制源项目中的简单单语句台词、

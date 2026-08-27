@@ -1,8 +1,54 @@
 import type {
   FormErrors,
+  RenpyCompatibilityReport,
   TranslationForm,
   TranslationStage,
 } from "./types";
+
+export interface CompatibilityPresentation {
+  label: string;
+  nextStep: string;
+  tone: "ready" | "blocked" | "uncertain";
+}
+
+export function compatibilityPresentation(
+  report: RenpyCompatibilityReport,
+): CompatibilityPresentation {
+  return {
+    source_ready: {
+      label: "源码项目可用",
+      nextStep: "可以继续选择 Ren'Py SDK、翻译服务和全新输出目录。",
+      tone: "ready",
+    },
+    packaged_requires_import: {
+      label: "已识别成品，当前不能导入",
+      nextStep:
+        "GalTrans 不会解包 RPA 或反编译 RPYc。请保留原目录，等待受支持的只读导入能力。",
+      tone: "blocked",
+    },
+    uncertain: {
+      label: "证据不足，已安全停止",
+      nextStep:
+        "请改选游戏安装根目录（通常同时包含 game 和启动器）或其 game 目录，然后重新检查。",
+      tone: "uncertain",
+    },
+    not_renpy: {
+      label: "未识别为 Ren'Py",
+      nextStep: "请重新选择包含 game 目录的 Ren'Py 游戏或源码项目。",
+      tone: "blocked",
+    },
+  }[report.status] as CompatibilityPresentation;
+}
+
+export function compatibleProjectError(
+  report: RenpyCompatibilityReport | null,
+  projectPath: string,
+): string | undefined {
+  if (!projectPath.trim()) return "请选择 Ren'Py 游戏或源码项目";
+  if (!report || report.project_root !== projectPath) return "请先运行只读兼容性检查";
+  if (!report.can_translate_now) return compatibilityPresentation(report).nextStep;
+  return undefined;
+}
 
 export const PIPELINE_STAGES: ReadonlyArray<{
   id: TranslationStage;
@@ -27,7 +73,7 @@ function isLoopback(hostname: string): boolean {
 export function validateTranslationForm(form: TranslationForm): FormErrors {
   const errors: FormErrors = {};
   if (!form.sdkPath.trim()) errors.sdkPath = "请选择 Ren'Py SDK";
-  if (!form.projectPath.trim()) errors.projectPath = "请选择带 game 目录的源项目";
+  if (!form.projectPath.trim()) errors.projectPath = "请选择 Ren'Py 游戏或源码项目";
   if (!form.outputPath.trim()) errors.outputPath = "请选择一个全新的输出路径";
   if (!form.model.trim()) errors.model = "请填写翻译模型名称";
   if (!form.apiKey) {

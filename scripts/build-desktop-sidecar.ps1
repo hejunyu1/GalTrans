@@ -96,7 +96,8 @@ try {
 
     $smokeSecret = "galtrans-sidecar-smoke-secret"
     $smokeRequest = @{
-        schema_version = 1
+        schema_version = 2
+        operation = "translate"
         sdk_path = Join-Path $resolvedBuildRoot "missing-sdk"
         project_path = Join-Path $resolvedBuildRoot "missing-project"
         output_path = Join-Path $resolvedBuildRoot "unused-output"
@@ -134,14 +135,51 @@ try {
     $progressEvents = @($smokeEvents | Select-Object -SkipLast 1)
     $smokeEvent = $smokeEvents[-1]
     if (
-        $smokeEvent.schema_version -ne 1 -or
+        $smokeEvent.schema_version -ne 2 -or
         $smokeEvent.type -ne "failed" -or
         [string]::IsNullOrWhiteSpace($smokeEvent.message) -or
         @($progressEvents | Where-Object {
-            $_.schema_version -ne 1 -or $_.type -ne "progress"
+            $_.schema_version -ne 2 -or $_.type -ne "progress"
         }).Count -ne 0
     ) {
         Write-Error "sidecar 冒烟测试返回了无效终态。"
+        exit 1
+    }
+
+    $compatibilityRoot = Join-Path $resolvedBuildRoot "compatibility-smoke"
+    $compatibilityGame = Join-Path $compatibilityRoot "game"
+    New-Item -ItemType Directory -Path $compatibilityGame -Force | Out-Null
+    [System.IO.File]::WriteAllText(
+        (Join-Path $compatibilityGame "script.rpy"),
+        "label start:`n    pass`n",
+        [System.Text.UTF8Encoding]::new($false)
+    )
+    $compatibilityRequest = @{
+        schema_version = 2
+        operation = "inspect_renpy_compatibility"
+        project_path = $compatibilityRoot
+    } | ConvertTo-Json -Compress
+    $compatibilityLines = @($compatibilityRequest | & $builtBinary 2>&1)
+    $compatibilityExitCode = $LASTEXITCODE
+    try {
+        $compatibilityEvents = @(
+            $compatibilityLines | ForEach-Object { $_.ToString() | ConvertFrom-Json }
+        )
+    }
+    catch {
+        Write-Error "sidecar 兼容性冒烟测试没有返回有效 JSONL。"
+        exit 1
+    }
+    if (
+        $compatibilityExitCode -ne 0 -or
+        $compatibilityEvents.Count -ne 1 -or
+        $compatibilityEvents[0].schema_version -ne 2 -or
+        $compatibilityEvents[0].type -ne "compatibility_report" -or
+        $compatibilityEvents[0].report.schema_version -ne 1 -or
+        $compatibilityEvents[0].report.status -ne "source_ready" -or
+        $compatibilityEvents[0].report.can_translate_now -ne $true
+    ) {
+        Write-Error "sidecar 兼容性冒烟测试没有返回可用的关闭式报告。"
         exit 1
     }
 

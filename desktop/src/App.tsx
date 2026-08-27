@@ -6,6 +6,7 @@ import type { CSSProperties } from "react";
 
 import type {
   FormErrors,
+  RenpyCompatibilityReport,
   TranslationEvent,
   TranslationForm,
   TranslationResult,
@@ -13,13 +14,15 @@ import type {
 } from "./types";
 import {
   PIPELINE_STAGES,
+  compatibilityPresentation,
+  compatibleProjectError,
   progressPercent,
   stagePosition,
   suggestOutputPath,
   validateTranslationForm,
 } from "./workflow";
 
-type PathField = "sdkPath" | "projectPath";
+type PathField = "sdkPath";
 
 const INITIAL_FORM: TranslationForm = {
   sdkPath: "",
@@ -121,6 +124,10 @@ function App() {
   ]);
   const [result, setResult] = useState<TranslationResult | null>(null);
   const [failure, setFailure] = useState<string | null>(null);
+  const [compatibility, setCompatibility] =
+    useState<RenpyCompatibilityReport | null>(null);
+  const [compatibilityChecking, setCompatibilityChecking] = useState(false);
+  const [compatibilityFailure, setCompatibilityFailure] = useState<string | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -160,18 +167,69 @@ function App() {
   const completedCount = result?.segment_count ?? 0;
   const lowConfidenceCount = result?.low_confidence_segment_ids.length ?? 0;
   const formComplete = useMemo(
-    () => Object.keys(validateTranslationForm(form)).length === 0,
-    [form],
+    () =>
+      Object.keys(validateTranslationForm(form)).length === 0 &&
+      !compatibleProjectError(compatibility, form.projectPath),
+    [compatibility, form],
   );
+  const compatibilityView = compatibility
+    ? compatibilityPresentation(compatibility)
+    : null;
+  const projectReady = !compatibleProjectError(compatibility, form.projectPath);
 
   function updateField(field: keyof TranslationForm, value: string) {
     setForm((current) => ({ ...current, [field]: value }));
     setErrors((current) => ({ ...current, [field]: undefined }));
+    if (field === "projectPath") {
+      setCompatibility(null);
+      setCompatibilityFailure(null);
+    }
   }
 
   async function chooseDirectory(field: PathField, title: string) {
     const selected = await open({ directory: true, multiple: false, title });
     if (typeof selected === "string") updateField(field, selected);
+  }
+
+  async function checkCompatibility(path: string = form.projectPath) {
+    const selectedPath = path.trim();
+    if (!selectedPath) {
+      setErrors((current) => ({
+        ...current,
+        projectPath: "请选择 Ren'Py 游戏或源码项目",
+      }));
+      return;
+    }
+    setCompatibilityChecking(true);
+    setCompatibility(null);
+    setCompatibilityFailure(null);
+    setErrors((current) => ({ ...current, projectPath: undefined }));
+    try {
+      const report = await invoke<RenpyCompatibilityReport>(
+        "inspect_renpy_compatibility",
+        { request: { projectPath: selectedPath } },
+      );
+      setForm((current) => ({ ...current, projectPath: report.project_root }));
+      setCompatibility(report);
+    } catch (error) {
+      const message = String(error || "只读兼容性检查异常结束");
+      setCompatibilityFailure(message);
+      setErrors((current) => ({ ...current, projectPath: message }));
+    } finally {
+      setCompatibilityChecking(false);
+    }
+  }
+
+  async function chooseProjectDirectory() {
+    const selected = await open({
+      directory: true,
+      multiple: false,
+      title: "选择 Ren'Py 游戏或源码项目",
+    });
+    if (typeof selected === "string") {
+      updateField("projectPath", selected);
+      await checkCompatibility(selected);
+    }
   }
 
   async function chooseOutputParent() {
@@ -187,8 +245,15 @@ function App() {
 
   async function startTranslation() {
     const validation = validateTranslationForm(form);
+    const projectError = compatibleProjectError(compatibility, form.projectPath);
+    if (projectError) validation.projectPath = projectError;
     setErrors(validation);
-    if (Object.keys(validation).length > 0 || running || !eventsReady) return;
+    if (
+      Object.keys(validation).length > 0 ||
+      running ||
+      compatibilityChecking ||
+      !eventsReady
+    ) return;
 
     const request = { ...form };
     setForm((current) => ({ ...current, apiKey: "" }));
@@ -225,7 +290,7 @@ function App() {
           </span>
         </div>
         <div className="preview-badge">
-          <span /> Source-only Ren'Py Preview
+          <span /> Read-only Ren'Py Compatibility
         </div>
       </header>
 
@@ -234,34 +299,74 @@ function App() {
           <div className="hero-copy">
             <span className="eyebrow">AUTOMATIC WORKSPACE</span>
             <h1>把日文视觉小说<br />变成你的中文补丁</h1>
-            <p>一次配置，自动提取、翻译、质检和验证。原游戏目录始终保持只读。</p>
+            <p>先做只读兼容性检查，再自动提取、翻译、质检和验证。原游戏目录始终保持只读。</p>
           </div>
 
           <div className="step-card">
             <div className="step-heading">
               <span className="step-number">01</span>
-              <span><strong>选择游戏源文件</strong><small>当前支持带 .rpy/.rpym 的 Ren'Py 项目</small></span>
+              <span><strong>选择并检查游戏</strong><small>识别源码项目、成品结构和不支持的目录</small></span>
             </div>
             <div className="field-grid">
+              <Field
+                label="Ren'Py 游戏或源码项目"
+                value={form.projectPath}
+                placeholder="选择游戏安装根目录或其 game 目录"
+                error={errors.projectPath}
+                disabled={running || compatibilityChecking}
+                onChange={(value) => updateField("projectPath", value)}
+                onBrowse={() => void chooseProjectDirectory()}
+              />
               <Field
                 label="Ren'Py SDK"
                 value={form.sdkPath}
                 placeholder="例如 D:\\renpy-8.5.3-sdk"
                 error={errors.sdkPath}
-                disabled={running}
+                disabled={running || compatibilityChecking}
                 onChange={(value) => updateField("sdkPath", value)}
                 onBrowse={() => void chooseDirectory("sdkPath", "选择 Ren'Py SDK")}
               />
-              <Field
-                label="源项目"
-                value={form.projectPath}
-                placeholder="选择包含 game 目录的项目"
-                error={errors.projectPath}
-                disabled={running}
-                onChange={(value) => updateField("projectPath", value)}
-                onBrowse={() => void chooseDirectory("projectPath", "选择 Ren'Py 源项目")}
-              />
             </div>
+            <div className="compatibility-actions">
+              <button
+                type="button"
+                className="compatibility-button"
+                disabled={running || compatibilityChecking || !form.projectPath.trim()}
+                onClick={() => void checkCompatibility()}
+              >
+                {compatibilityChecking ? "正在只读检查…" : compatibility ? "重新检查" : "检查兼容性"}
+              </button>
+              <span>只枚举已知文件；不打开 RPA、不反编译 RPYc、不运行游戏。</span>
+            </div>
+            {compatibility && compatibilityView ? (
+              <div className={`compatibility-card ${compatibilityView.tone}`}>
+                <div className="compatibility-title">
+                  <strong>{compatibilityView.label}</strong>
+                  <span>{compatibility.summary}</span>
+                </div>
+                <div className="compatibility-counts">
+                  <span>源码 <strong>{compatibility.counts.source_scripts}</strong></span>
+                  <span>编译脚本 <strong>{compatibility.counts.compiled_scripts}</strong></span>
+                  <span>归档 <strong>{compatibility.counts.archives}</strong></span>
+                  <span>已有翻译 <strong>{compatibility.counts.translation_files}</strong></span>
+                  <span>启动器 <strong>{compatibility.counts.launchers}</strong></span>
+                </div>
+                <p>{compatibilityView.nextStep}</p>
+                {compatibility.version_hints[0] ? (
+                  <small>版本线索：Ren'Py {compatibility.version_hints[0].version}</small>
+                ) : null}
+                {compatibility.issues.slice(0, 3).map((issue) => (
+                  <small key={`${issue.code}-${issue.relative_path}`}>
+                    {issue.relative_path}：{issue.message}
+                  </small>
+                ))}
+              </div>
+            ) : compatibilityFailure ? (
+              <div className="compatibility-card blocked">
+                <div className="compatibility-title"><strong>兼容性检查失败</strong></div>
+                <p>{compatibilityFailure}</p>
+              </div>
+            ) : null}
           </div>
 
           <div className="step-card">
@@ -275,7 +380,7 @@ function App() {
                 value={form.endpoint}
                 placeholder="https://…/v1/chat/completions"
                 error={errors.endpoint}
-                disabled={running}
+                disabled={running || compatibilityChecking}
                 onChange={(value) => updateField("endpoint", value)}
               />
               <Field
@@ -283,7 +388,7 @@ function App() {
                 value={form.model}
                 placeholder="填写服务提供的模型名"
                 error={errors.model}
-                disabled={running}
+                disabled={running || compatibilityChecking}
                 onChange={(value) => updateField("model", value)}
               />
             </div>
@@ -292,7 +397,7 @@ function App() {
               value={form.apiKey}
               placeholder="只在本次任务的内存中使用"
               error={errors.apiKey}
-              disabled={running}
+              disabled={running || compatibilityChecking}
               secret
               onChange={(value) => updateField("apiKey", value)}
             />
@@ -309,7 +414,7 @@ function App() {
               value={form.outputPath}
               placeholder="选择父目录后自动建议新名称"
               error={errors.outputPath}
-              disabled={running}
+              disabled={running || compatibilityChecking}
               onChange={(value) => updateField("outputPath", value)}
               onBrowse={() => void chooseOutputParent()}
             />
@@ -318,11 +423,11 @@ function App() {
           <button
             className="start-button"
             type="button"
-            disabled={running || !eventsReady}
+            disabled={running || compatibilityChecking || !eventsReady || !projectReady}
             onClick={() => void startTranslation()}
           >
             <SparkIcon />
-            <span>{running ? "自动汉化进行中…" : "开始自动汉化"}<small>{formComplete ? "配置已就绪" : "完成上方配置后开始"}</small></span>
+            <span>{running ? "自动汉化进行中…" : "开始自动汉化"}<small>{!projectReady ? "先通过只读兼容性检查" : formComplete ? "配置已就绪" : "完成上方配置后开始"}</small></span>
             <span className="button-arrow">→</span>
           </button>
         </section>

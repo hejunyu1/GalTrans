@@ -145,13 +145,17 @@
   - GUI API key 不进入环境变量、命令行、SQLite、进度或错误日志；开始后清空输入控件，后台
     Worker 完成后释放请求引用，并在意外错误文本中替换凭据值。
   - `desktop/` 使用 React、TypeScript 和 Tauri 2 提供现代 Windows 工作台。前端只拥有原生
-    文件夹选择和一个 `start_translation` 命令，不拥有通用文件系统、Shell 或 Provider 网络能力。
+    文件夹选择、类型化的 `inspect_renpy_compatibility` 与 `start_translation` 命令，不拥有通用
+    文件系统、Shell 或 Provider 网络能力。
   - 固定 PyInstaller 构建步骤把 `galtrans.desktop_bridge`、GalTrans 模块、CPython 运行时和所需
     标准库冻结为单文件 Windows sidecar，并按 Tauri 目标三元组命名输入文件；生成物不进入 Git。
   - Tauri `externalBin` 把 sidecar 复制到应用资源目录，Rust 后端只从该固定目录启动
     `galtrans-backend.exe`，不查找仓库、`.venv`、源码或 `PYTHONPATH`。请求通过有大小上限的
-    JSON 标准输入传递，进度和终态通过关闭式 v1 JSONL 标准输出返回；Rust 再次校验 schema、
-    阶段、计数、质量结果和终态，并拒绝并发任务或异常输出。
+    v2 JSON 标准输入传递，进度、兼容性报告和终态通过关闭式 JSONL 标准输出返回；Rust 再次校验
+    操作、schema、兼容性状态与计数、阶段、质量结果和终态，并拒绝并发任务或异常输出。
+  - 选择游戏目录会先调用 Python 适配器的只读兼容性检查。界面展示四种关闭状态、证据计数、
+    版本线索、问题和下一步；只有与当前规范化项目路径一致的 `source_ready` 报告会解锁翻译。
+    桌面翻译操作在进入 SDK 或 Provider 前再次执行同一检查，避免绕过或过期的前端状态。
   - 现代界面的 API key 开始后立即从 React 状态清空，只通过 Python 子进程标准输入传递；Rust
     显式移除 `GALTRANS_API_KEY`、`PYTHONHOME` 和 `PYTHONPATH`，不传命令行参数，并在异常文本中
     隐藏实际凭据。前端仍没有 Tauri Shell 或文件系统权限。
@@ -251,7 +255,8 @@ OpenAI 兼容同步 HTTP 适配器；没有 Agent 子进程或外部会话，兼
 [ADR 0016](decisions/0016-automatic-renpy-provider-workflow.md)，最小玩家界面与进度边界见
 [ADR 0017](decisions/0017-minimal-windows-player-interface.md)，现代 Tauri 工作台与进程桥见
 [ADR 0018](decisions/0018-typescript-tauri-player-workbench.md)，固定 Python sidecar 打包与运行边界见
-[ADR 0020](decisions/0020-packaged-python-tauri-sidecar.md)。
+[ADR 0020](decisions/0020-packaged-python-tauri-sidecar.md)，桌面兼容性接入见
+[ADR 0021](decisions/0021-tauri-renpy-compatibility-report.md)。
 
 ## Ren'Py 兼容性识别边界
 
@@ -263,9 +268,11 @@ RPYc 编译脚本只按路径与扩展名记录，绝不打开或解释内容；
 关闭式 v1 报告只产生四种状态：`source_ready` 表示完整扫描发现当前流程可读的松散源脚本；
 `packaged_requires_import` 表示编译脚本或由启动器/运行时佐证的归档构成标准成品证据，但当前不
 能继续；`uncertain` 表示证据不足、扫描不完整或跨边界链接；`not_renpy` 表示没有足够证据。
-报告还分开列出已有 `game/tl` 文件，避免把现有译文误当成原始源脚本。该接口目前不接 CLI、GUI、
-Provider、工作区、导出或启动流程；决策见
-[ADR 0019](decisions/0019-read-only-renpy-compatibility-report.md)。
+报告还分开列出已有 `game/tl` 文件，避免把现有译文误当成原始源脚本。Tauri Rust 命令通过固定
+sidecar 调用该接口并重新校验完整关闭式报告，React 只负责展示和在非 `source_ready` 状态下阻止
+翻译；报告仍不接 CLI、Tkinter、Provider、工作区、导出或启动流程。识别边界见
+[ADR 0019](decisions/0019-read-only-renpy-compatibility-report.md)，桌面接入见
+[ADR 0021](decisions/0021-tauri-renpy-compatibility-report.md)。
 
 ## 稳定 ID
 

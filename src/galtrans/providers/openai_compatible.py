@@ -10,6 +10,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
+from galtrans import __version__
 from galtrans.translation import (
     PROVIDER_RECEIPT_SCHEMA_VERSION,
     TRANSLATION_PROPOSAL_SCHEMA_VERSION,
@@ -325,7 +326,7 @@ class OpenAICompatibleChatBackend:
                 "Authorization": f"Bearer {self._api_key}",
                 "Content-Type": "application/json; charset=utf-8",
                 "Idempotency-Key": idempotency_key,
-                "User-Agent": "GalTrans/0.4.2",
+                "User-Agent": f"GalTrans/{__version__}",
             },
             method="POST",
         )
