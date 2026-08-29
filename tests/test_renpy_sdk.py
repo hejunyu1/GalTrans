@@ -45,11 +45,12 @@ class RenpySdkTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             sdk_root = self._make_sdk(root)
+            expected_sdk_root = sdk_root.resolve()
 
             resolved_root, executable = resolve_renpy_sdk(root / "download")
 
-        self.assertEqual(resolved_root, sdk_root)
-        self.assertEqual(executable, sdk_root / "renpy.exe")
+        self.assertEqual(resolved_root, expected_sdk_root)
+        self.assertEqual(executable, expected_sdk_root / "renpy.exe")
 
     def test_rejects_standalone_executable_without_sdk_structure(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

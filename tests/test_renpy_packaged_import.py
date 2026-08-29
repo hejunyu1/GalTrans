@@ -115,6 +115,7 @@ class RenpyPackagedImportTests(unittest.TestCase):
             )
             before = _snapshot(project)
             output = root / "imported"
+            expected_output = output.resolve()
 
             result = import_renpy_packaged_sources(
                 project,
@@ -142,9 +143,12 @@ class RenpyPackagedImportTests(unittest.TestCase):
         self.assertEqual(imported_script, script)
         self.assertEqual(imported_module, module)
         self.assertEqual(extracted_text, ("Hello",))
-        self.assertEqual(result.root, output)
+        self.assertEqual(result.root, expected_output)
         self.assertEqual(
-            [path.relative_to(output).as_posix() for path in result.source_files],
+            [
+                path.relative_to(expected_output).as_posix()
+                for path in result.source_files
+            ],
             ["game/module/helpers.rpym", "game/script.rpy"],
         )
         self.assertEqual(staging_paths, ())

@@ -132,6 +132,7 @@ class RenpyExporterTests(unittest.TestCase):
             source.write_bytes(b'label start:\n    "Original"\n')
             original_source = source.read_bytes()
             output_root = root / "output"
+            expected_output_root = output_root.resolve()
 
             result = write_official_translation_directory(
                 files,
@@ -139,12 +140,14 @@ class RenpyExporterTests(unittest.TestCase):
                 input_project_root=project_root,
             )
 
-            output_file = output_root / "game" / "tl" / "schinese" / "script.rpy"
+            output_file = (
+                expected_output_root / "game" / "tl" / "schinese" / "script.rpy"
+            )
             output_bytes = output_file.read_bytes()
             staging_paths = tuple(root.glob(".galtrans-renpy-*"))
             final_source = source.read_bytes()
 
-        self.assertEqual(result.root, output_root)
+        self.assertEqual(result.root, expected_output_root)
         self.assertEqual(result.files, (output_file,))
         self.assertTrue(output_bytes.startswith(b"\xef\xbb\xbf"))
         self.assertNotIn(b"\r\n", output_bytes)
